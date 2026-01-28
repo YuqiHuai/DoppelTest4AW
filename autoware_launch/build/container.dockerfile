@@ -1,0 +1,1 @@
+FROM ghcr.io/autowarefoundation/autoware:cuda-latest
