@@ -3,9 +3,9 @@ from random import randint, uniform
 from secrets import choice
 from typing import List
 
-from DoppelAutoware.hdmap.MapParser import MapParser
+from scenario_runner.hdmap.MapParser import MapParser
 
-DEFAULT_MAP = "DoppelAutoware/data/maps/sample-map-planning/lanelet2_map.osm"
+DEFAULT_MAP = "autoware_map/sample-map-planning/lanelet2_map.osm"
 MAX_PD_COUNT = 5
 SCENARIO_UPPER_LIMIT = 30
 

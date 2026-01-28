@@ -1,6 +1,6 @@
 from typing import Dict, List
 
-from DoppelAutoware.framework.scenario.tc_config import TCSection
+from scenario_runner.framework.scenario.tc_config import TCSection
 
 FORCE_INVALID_TRAFFIC_CONTROL = False
 

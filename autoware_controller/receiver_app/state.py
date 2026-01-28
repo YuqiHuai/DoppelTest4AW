@@ -17,8 +17,10 @@ server_globals = {
     "autoware_process": None,
     "autoware_launch_cmd": None,
     "autoware_log_file": None,
+    "active_map_path": None,
     "sender_process": None,
     "sender_log_file": None,
+    "active_map_name": None,
     "traffic_signal_state": {
         "map_primitive_id": 301,
         "color": TrafficLightElement.RED,

@@ -29,6 +29,19 @@ Describe the launch/execute steps to:
 2. Start DoppelTest components
 3. Start the receiver/controller
 
+Autoware containers:
+```
+# Build multi-container image (once, or after Dockerfile changes)
+bash autoware_launch/build/build_docker.sh --multi_container
+
+# Start containers (repeat for each instance)
+bash autoware_launch/scripts/dev_start.sh --use_multi_container --container_name autoware_1
+bash autoware_launch/scripts/dev_start.sh --use_multi_container --container_name autoware_2
+
+# Enter a container
+bash autoware_launch/scripts/dev_into.sh --container_name autoware_1
+```
+
 Example placeholders:
 ```
 # Terminal 1

@@ -120,14 +120,21 @@ class MapParser:
         map_path = Path(map_name)
         if not map_path.is_file():
             base_dir = Path(__file__).resolve().parents[1]
-            map_dir = Path(base_dir, "data", "maps")
-            candidate = Path(map_dir, map_name)
-            if candidate.is_dir():
-                osm_files = list(candidate.glob("*.osm"))
-                if osm_files:
-                    map_path = osm_files[0]
-            elif candidate.with_suffix(".osm").exists():
-                map_path = candidate.with_suffix(".osm")
+            repo_root = Path(__file__).resolve().parents[2]
+            map_roots = [
+                repo_root / "autoware_map",
+                base_dir / "data" / "maps",
+            ]
+            for map_root in map_roots:
+                candidate = map_root / map_name
+                if candidate.is_dir():
+                    osm_files = list(candidate.glob("*.osm"))
+                    if osm_files:
+                        map_path = osm_files[0]
+                        break
+                elif candidate.with_suffix(".osm").exists():
+                    map_path = candidate.with_suffix(".osm")
+                    break
 
         assert map_path.exists(), f"OSM map {map_name} does not exist!"
         if str(map_path) in MapParser.__instance:
@@ -1091,7 +1098,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Print useful Lanelet2 map stats.")
     parser.add_argument(
         "--map",
-        default="/home/sora/Desktop/xiangl/final_defense/DoppelAutoware/data/maps/nishishinjuku_autoware_map/lanelet2_map.osm",
+        default="autoware_map/sample-map-planning/lanelet2_map.osm",
         help="Map name or path (OSM path for Lanelet2).",
     )
     parser.add_argument(

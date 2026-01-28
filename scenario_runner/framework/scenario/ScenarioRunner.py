@@ -3,16 +3,17 @@ import math
 import time
 import uuid
 from logging import Logger
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
 import requests
 
-from DoppelAutoware_previousoneDoppelAutoware_previous.framework.scenario.PedestrianManager import PedestrianManager
-from DoppelAutoware_previousoneDoppelAutoware_previous.framework.scenario.TrafficControlManager import (
+from scenario_runner.framework.scenario.PedestrianManager import PedestrianManager
+from scenario_runner.framework.scenario.TrafficControlManager import (
     TrafficControlManager,
 )
-from DoppelAutoware_previousoneDoppelAutoware_previous.framework.scenario.ad_agents import ADAgent
-from DoppelAutoware_previousoneDoppelAutoware_previous.framework.scenario.tc_config import SCENARIO_UPPER_LIMIT
+from scenario_runner.framework.scenario.ad_agents import ADAgent
+from scenario_runner.framework.scenario.tc_config import SCENARIO_UPPER_LIMIT
 
 
 class AutoModeUnavailableError(RuntimeError):
@@ -115,7 +116,21 @@ class VehicleEndpoint:
     def stop_logging(self):
         return self._post("/logging/stop")
 
-    def start_autoware(self):
+    def start_autoware(
+        self,
+        map_path: Optional[str] = None,
+        vehicle_model: Optional[str] = None,
+        sensor_model: Optional[str] = None,
+    ):
+        payload = {}
+        if map_path:
+            payload["map_path"] = map_path
+        if vehicle_model:
+            payload["vehicle_model"] = vehicle_model
+        if sensor_model:
+            payload["sensor_model"] = sensor_model
+        if payload:
+            return self._post("/autoware/start", json_body=payload)
         return self._post("/autoware/start")
 
     def start_sender(self):
@@ -215,6 +230,25 @@ class ScenarioRunner:
         self._restart_wait_s = 120.0
         self._autoware_started = False
         self._sender_started = False
+        self._repo_root = Path(__file__).resolve().parents[3]
+
+    def _resolve_autoware_map_path(self) -> Optional[str]:
+        map_path = getattr(self.curr_scenario, "map_path", None)
+        if not map_path:
+            return None
+        path = Path(map_path)
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if path.is_file():
+            map_dir = path.parent
+        else:
+            map_dir = path
+        map_name = map_dir.name
+        candidate = self._repo_root / "autoware_map" / map_name
+        if candidate.exists():
+            # Return a repo-relative path so the container can resolve it.
+            return str(Path("autoware_map") / map_name)
+        return str(map_dir)
 
     def configure_recovery(
         self, restart_wait_s: float = 120.0
@@ -346,7 +380,7 @@ class ScenarioRunner:
         # Validate that no vehicles are initialized too close together
         ad_section = self.curr_scenario.ad_section
         if hasattr(ad_section, 'adcs') and len(ad_section.adcs) > 1:
-            from DoppelAutoware_previousoneDoppelAutoware_previous.framework.scenario.ad_agents import (
+            from scenario_runner.framework.scenario.ad_agents import (
                 MIN_VEHICLE_SPACING,
                 generate_vehicle_polygon,
             )
@@ -497,9 +531,10 @@ class ScenarioRunner:
         )
         if not self._autoware_started:
             scenario_logger.info("Starting Autoware for all vehicles...")
+            autoware_map_path = self._resolve_autoware_map_path()
             for vehicle in self.vehicles:
                 try:
-                    vehicle.start_autoware()
+                    vehicle.start_autoware(map_path=autoware_map_path)
                 except Exception as exc:
                     if self._is_autoware_already_running(exc):
                         scenario_logger.info(
@@ -531,10 +566,13 @@ class ScenarioRunner:
         for idx, adc in enumerate(adcs):
             vehicle = self.vehicles[idx]
             self._configure_vehicle(vehicle, adc)
-            if save_record:
-                log_name = f"{generation_name}_{scenario_name}_{vehicle.name}_{int(time.time())}"
-                vehicle.start_logging(log_name)
             active_runs.append((vehicle, adc))
+
+        if save_record and active_runs:
+            log_ts = int(time.time())
+            for vehicle, _adc in active_runs:
+                log_name = f"{generation_name}_{scenario_name}_{vehicle.name}_{log_ts}"
+                vehicle.start_logging(log_name)
 
         start_flags = [False] * len(active_runs)
         scenario_start = time.time()
@@ -641,9 +679,9 @@ def main() -> None:
     args = parser.parse_args()
 
     map_path = args.map
-    from DoppelAutoware_previousoneDoppelAutoware_previous.framework.scenario.ad_agents import ADSection
-    from DoppelAutoware_previousoneDoppelAutoware_previous.framework.scenario.pd_agents import PDSection
-    from DoppelAutoware_previousoneDoppelAutoware_previous.framework.scenario.tc_config import TCSection
+    from scenario_runner.framework.scenario.ad_agents import ADSection
+    from scenario_runner.framework.scenario.pd_agents import PDSection
+    from scenario_runner.framework.scenario.tc_config import TCSection
 
     try:
         if map_path:

@@ -35,3 +35,7 @@ Thumbs.db
 
 # Logs
 *.log
+scenario_runs*/
+*.gif
+metadata.yaml
+*.db3

@@ -441,6 +441,10 @@ async def sender_start():
     try:
         env = os.environ.copy()
         env["ROS_DOMAIN_ID"] = os.environ.get("ROS_DOMAIN_ID", "1")
+        if "RECEIVER_URL" in os.environ:
+            env["RECEIVER_URL"] = os.environ["RECEIVER_URL"]
+        if "RECEIVER_URLS" in os.environ:
+            env["RECEIVER_URLS"] = os.environ["RECEIVER_URLS"]
         log_dir = AUTOWARE_LOG_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = open(log_dir / "sender.log", "a", encoding="utf-8")
@@ -536,6 +540,9 @@ async def autoware_start(request: AutowareLaunchRequest = AutowareLaunchRequest(
         server_globals["autoware_process"] = process
         server_globals["autoware_launch_cmd"] = command
         server_globals["autoware_log_file"] = log_file
+        map_dir = map_path.parent if map_path.is_file() else map_path
+        server_globals["active_map_name"] = map_dir.name
+        server_globals["active_map_path"] = str(map_dir)
         if node:
             node.get_logger().info(
                 f"Started Autoware launch. PID: {process.pid}, Map: {map_path}"
@@ -576,6 +583,8 @@ async def autoware_restart(request: AutowareLaunchRequest = AutowareLaunchReques
     process = server_globals.get("autoware_process")
     if process and process.poll() is None:
         _stop_autoware_process("api restart")
+    if request.map_path is None:
+        request.map_path = server_globals.get("active_map_path")
     return await autoware_start(request)
 
 
@@ -710,14 +719,29 @@ async def calculate_violation(
             status_code=404,
             detail=f"Recorded bag directory not found: {record_path}",
         )
+    db3_files = sorted(record_path.glob("*.db3"))
+    if not db3_files:
+        if node:
+            node.get_logger().error(
+                f"No rosbag .db3 files found in {record_path}. Did logging start/stop correctly?"
+            )
+        raise HTTPException(
+            status_code=404,
+            detail=f"No rosbag .db3 files found in {record_path}",
+        )
+    if node:
+        node.get_logger().info(
+            f"Rosbag files: {[p.name for p in db3_files]}"
+        )
 
+    map_name = server_globals.get("active_map_name") or VIOLATION_MAP_NAME
     node.get_logger().info(
-        f"Starting violation analysis for record at {record_path} using map {VIOLATION_MAP_NAME}."
+        f"Starting violation analysis for record at {record_path} using map {map_name}."
     )
     try:
         route_ids = req.route_lanelet_ids or None
         violations = await asyncio.to_thread(
-            measure_violations, VIOLATION_MAP_NAME, record_path, route_ids
+            measure_violations, map_name, record_path, route_ids
         )
     except Exception as exc:
         node.get_logger().error(f"Violation analysis failed: {exc}")
@@ -747,7 +771,7 @@ async def calculate_violation(
     )
     return {
         "status": "ok",
-        "map": VIOLATION_MAP_NAME,
+        "map": map_name,
         "record_directory": str(record_path),
         "violation_count": len(serialized),
         "min_distance": min_distance,

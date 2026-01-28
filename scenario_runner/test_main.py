@@ -9,20 +9,20 @@ import uuid
 import numpy as np
 from deap import algorithms, base, tools
 
-from DoppelAutoware.framework.scenario.ScenarioRunner import (
+from scenario_runner.framework.scenario.ScenarioRunner import (
     AutoModeUnavailableError,
     ScenarioRunner,
     VehicleEndpoint,
 )
-from DoppelAutoware.framework.scenario.ad_agents import (
+from scenario_runner.framework.scenario.ad_agents import (
     ADAgent,
     ADSection,
     DEFAULT_MAP,
     MAX_ADC_COUNT,
 )
-from DoppelAutoware.framework.scenario.pd_agents import PDSection, PDAgent, MAX_PD_COUNT
-from DoppelAutoware.framework.scenario.tc_config import TCSection
-from DoppelAutoware.hdmap.MapParser import MapParser
+from scenario_runner.framework.scenario.pd_agents import PDSection, PDAgent, MAX_PD_COUNT
+from scenario_runner.framework.scenario.tc_config import TCSection
+from scenario_runner.hdmap.MapParser import MapParser
 
 
 class ScenarioFitness(base.Fitness):
@@ -411,7 +411,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--map",
-        default="/home/sora/Desktop/xiangl/final_defense/DoppelAutoware/data/maps/sample-map-planning/lanelet2_map.osm",
+        default="autoware_map/sample-map-planning/lanelet2_map.osm",
         help="Lanelet2 OSM map path.",
     )
     parser.add_argument(

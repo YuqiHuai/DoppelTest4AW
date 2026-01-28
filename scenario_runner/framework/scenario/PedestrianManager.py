@@ -3,10 +3,10 @@ from typing import Dict, List, Optional, Tuple
 
 from shapely.geometry import LineString, MultiLineString, Point
 
-from DoppelAutoware.framework.scenario.pd_agents import PDAgent, PDSection
-from DoppelAutoware.hdmap.MapParser import MapParser
+from scenario_runner.framework.scenario.pd_agents import PDAgent, PDSection
+from scenario_runner.hdmap.MapParser import MapParser
 
-DEFAULT_MAP = "DoppelAutoware/data/maps/sample-map-planning/lanelet2_map.osm"
+DEFAULT_MAP = "autoware_map/sample-map-planning/lanelet2_map.osm"
 
 
 class PedestrianManager:

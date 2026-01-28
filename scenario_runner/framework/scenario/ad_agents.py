@@ -8,9 +8,9 @@ import requests
 import time
 from shapely.geometry import Polygon
 
-from DoppelAutoware.hdmap.MapParser import MapParser
+from scenario_runner.hdmap.MapParser import MapParser
 
-DEFAULT_MAP = "DoppelAutoware/data/maps/sample-map-planning/lanelet2_map.osm"
+DEFAULT_MAP = "autoware_map/sample-map-planning/lanelet2_map.osm"
 INSTANCE_MAX_WAIT_TIME = 15
 MAX_ADC_COUNT = 3
 
