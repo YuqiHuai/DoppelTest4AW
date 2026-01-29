@@ -980,16 +980,6 @@ class MapParser:
         :returns: ID of lanes who is not in a junction
         :rtype: Set[str]
         """
-        # If explicit junctions were found, use the original method
-        if self.__lanes_at_junction:
-            lanes = set(self.get_lanes())
-            for junc in self.__lanes_at_junction:
-                jlanes = set(self.__lanes_at_junction[junc])
-                lanes = lanes - jlanes
-            return lanes
-        
-        # Fallback: If no explicit junctions found (e.g., OSM file doesn't have junction relations),
-        # use is_lane_in_intersection() heuristics to determine which lanes are in intersections
         return {
             lane_id
             for lane_id in self.get_lanes()
