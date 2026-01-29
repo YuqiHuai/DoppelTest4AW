@@ -568,6 +568,15 @@ class ScenarioRunner:
             self._configure_vehicle(vehicle, adc)
             active_runs.append((vehicle, adc))
 
+        scenario_logger.info("Restarting sender for all vehicles before auto mode...")
+        for vehicle in self.vehicles:
+            try:
+                vehicle.restart_sender()
+            except Exception as exc:
+                scenario_logger.warning("[%s] sender restart failed: %s", vehicle.name, exc)
+        scenario_logger.info("Sender restart requested; waiting 10s for startup.")
+        time.sleep(10.0)
+
         if save_record and active_runs:
             log_ts = int(time.time())
             for vehicle, _adc in active_runs:
