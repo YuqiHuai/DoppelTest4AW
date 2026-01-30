@@ -55,23 +55,29 @@ def _build_ad_section(count: int, map_path: str) -> ADSection:
     section = ADSection([])
     mp = MapParser.get_instance(map_path)
     trial_count = 0
-    max_trials = 50 * count  # Allow more attempts to find valid positions
-    while len(section.adcs) < count and trial_count < max_trials:
+    max_trials = 2000 * count  # Allow many attempts to ensure we reach count
+    allow_junction_start = False
+    while len(section.adcs) < count:
         candidate = ADAgent.get_one(
-            map_path=map_path, must_not_start_from_junction=True
+            map_path=map_path, must_not_start_from_junction=not allow_junction_start
         )
         if mp.is_lane_in_intersection(candidate.goal_pose.lanelet_id):
             trial_count += 1
-            continue
-        if section.add_agent(candidate):
-            # Successfully added
-            trial_count = 0
         else:
-            # Failed to add (too close), increment trial count
-            trial_count += 1
+            if section.add_agent(candidate):
+                # Successfully added
+                trial_count = 0
+            else:
+                # Failed to add (too close), increment trial count
+                trial_count += 1
 
-    # If we couldn't add enough agents, adjust time anyway
-    if len(section.adcs) > 0:
+        if trial_count >= max_trials:
+            # Relax constraints to avoid returning fewer than count agents
+            allow_junction_start = True
+            trial_count = 0
+
+    # Always adjust time (count should be reached here)
+    if section.adcs:
         section.adjust_time()
     return section
 
@@ -434,7 +440,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--log-dir",
-        default="scenario_runs_0126_sample_map_planning_2",
+        default="scenario_runs_0128_sample_map_planning",
         help="Directory to store scenario run metadata.",
     )
     parser.add_argument(
