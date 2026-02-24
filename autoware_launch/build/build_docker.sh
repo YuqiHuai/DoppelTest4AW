@@ -3,7 +3,7 @@
 # Default values
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # dockerfile="$SCRIPT_DIR/multi_container.dockerfile"
-# image_name="sora_autoware_multi_container:latest"
+# image_name="doppel_autoware_multi_container:latest"
 BUILD_MULTI_CONTAINER=false
 
 # Function to display help message
@@ -49,7 +49,7 @@ build_image() {
 }
 
 if [[ "$BUILD_MULTI_CONTAINER" == true ]]; then
-    build_image "$SCRIPT_DIR/multi_container.dockerfile" "sora_autoware_multi_container:latest"
+    build_image "$SCRIPT_DIR/multi_container.dockerfile" "${AUTOWARE_MULTI_IMAGE_NAME:-doppel_autoware_multi_container:latest}"
 else
-    build_image "$SCRIPT_DIR/container.dockerfile" "sora_autoware:latest"
+    build_image "$SCRIPT_DIR/container.dockerfile" "${AUTOWARE_IMAGE_NAME:-doppel_autoware:latest}"
 fi

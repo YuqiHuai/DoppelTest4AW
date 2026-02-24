@@ -5,6 +5,7 @@ USE_MULTI_CONTAINER=false
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 WORKSPACE_PATH=""
+DATA_PATH=""
 
 show_help() {
     echo -e "\e[34mUsage:\e[0m $0 [options]"
@@ -50,15 +51,21 @@ check_image() {
 }
 
 if [[ "$USE_MULTI_CONTAINER" == true ]]; then
-    IMAGE_NAME="sora_autoware_multi_container:latest"
+    IMAGE_NAME="${AUTOWARE_MULTI_IMAGE_NAME:-doppel_autoware_multi_container:latest}"
 else
-    IMAGE_NAME="sora_autoware:latest"
+    IMAGE_NAME="${AUTOWARE_IMAGE_NAME:-doppel_autoware:latest}"
 fi
 
 check_image
 
 if [[ "$WORKSPACE_PATH" == "" ]]; then
     WORKSPACE_PATH="$(pwd)"
+fi
+
+DATA_PATH="${AUTOWARE_DATA_HOST_PATH:-$WORKSPACE_PATH/data/autoware_data}"
+if [[ ! -d "$DATA_PATH" ]]; then
+    echo -e "\e[33m[WARN]: autoware_data directory not found at $DATA_PATH\e[0m"
+    echo -e "\e[33m[WARN]: Set AUTOWARE_DATA_HOST_PATH to override the mount source path.\e[0m"
 fi
 
 # check if container is running
@@ -68,8 +75,8 @@ if [[ "$(docker ps -q -f name=$CONTAINER_NAME)" != "" ]]; then
 fi
 
 rocker --nvidia --privileged --x11 --user \
-    --volume $WORKSPACE_PATH:$HOME/DoppelAutoware \
-    --volume /home/sora/autoware_data:/home/sora/autoware_data \
+    --volume "$WORKSPACE_PATH":"$HOME/DoppelAutoware" \
+    --volume "$DATA_PATH":"$HOME/autoware_data" \
     --name $CONTAINER_NAME \
     --mode non-interactive \
     --detach \
