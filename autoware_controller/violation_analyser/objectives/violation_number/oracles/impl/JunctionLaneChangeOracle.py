@@ -14,14 +14,18 @@ class JunctionLaneChangeOracle(OracleInterface):
         * y:            float
         * heading:      float
         * speed:        float
-        * junction_id:  int     # index of junction_id in a sorted list
+        * junction_id:  str     # explicit junction_id tag from lanelet map
+        * junction_lanelet_id: int
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.map_parser = VectorMapParser.instance()
+        # Map is keyed by lanelet id and stores explicit junction_id strings.
         self.junctions = self.map_parser.get_all_intersections()
-        self.junction_type_lanelets = self.map_parser.get_lanelets(identifiers=[junction_id for junction_id in self.junctions.keys()])
+        self.junction_type_lanelets = self.map_parser.get_lanelets(
+            identifiers=[lanelet_id for lanelet_id in self.junctions.keys()]
+        )
         self.last_localization = None
         self.violation = list()
 
@@ -62,11 +66,12 @@ class JunctionLaneChangeOracle(OracleInterface):
             return
 
         features = self.get_basic_info_from_localization(self.last_localization)
-        features['junction_id'] = current_lanelet.id
+        features['junction_id'] = self.junctions.get(current_lanelet.id, "")
+        features['junction_lanelet_id'] = current_lanelet.id
         self.violation.append(Violation(
             'JunctionLaneChangeOracle',
             features,
-            str(features['junction_id'])
+            str(features['junction_id'] or features['junction_lanelet_id'])
         ))
 
     def on_localization(self, message):

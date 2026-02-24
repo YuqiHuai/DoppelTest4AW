@@ -32,6 +32,18 @@ class OracleHelper:
         segments = getattr(msg, "segments", None)
         if segments:
             for seg in segments:
+                # Autoware LaneletRouteSegment commonly stores lane IDs in preferred_primitive.id.
+                preferred = getattr(seg, "preferred_primitive", None)
+                if preferred is not None:
+                    pid = getattr(preferred, "id", None)
+                    if isinstance(pid, int):
+                        ids.add(pid)
+                primitives = getattr(seg, "primitives", None)
+                if primitives:
+                    for prim in primitives:
+                        pid = getattr(prim, "id", None)
+                        if isinstance(pid, int):
+                            ids.add(pid)
                 for attr in ("preferred_lane_id", "lane_id", "lanelet_id"):
                     val = getattr(seg, attr, None)
                     if isinstance(val, int):

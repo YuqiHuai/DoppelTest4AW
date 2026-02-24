@@ -36,6 +36,7 @@ class MapLoader:
         map_parser = VectorMapParser.instance()
         map_parser.lanelet_map = self.load_map()
         map_parser.projector = self.projector
+        map_parser.map_path = self.hd_map_path
         self.map_instance = map_parser
 
     def load_map(self) -> LaneletMap:

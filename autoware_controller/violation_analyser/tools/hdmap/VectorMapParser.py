@@ -1,5 +1,6 @@
-from typing import List, Dict, Type, TypeVar, Optional
+from typing import Any, Dict, List, Optional, Type, TypeVar
 from dataclasses import dataclass
+import xml.etree.ElementTree as ET
 from lanelet2.core import Lanelet, LaneletMap, RegulatoryElement
 from shapely.geometry import Point, LineString
 try:
@@ -27,10 +28,19 @@ class Lane:
     tags: Optional[Dict] = None
 
 
+@dataclass
+class StopSign:
+    """Stop sign data structure."""
+    id: str
+    geometry: Point
+    tags: Dict
+
+
 class VectorMapParser:
     _instance = None
     lanelet_map: LaneletMap
     projector: MGRSProjector
+    map_path: Optional[str] = None
 
     T = TypeVar('T')
 
@@ -39,6 +49,15 @@ class VectorMapParser:
         if cls._instance is None:
             cls._instance = cls.__new__(cls)
         return cls._instance
+
+    @staticmethod
+    def _attr_get(attrs: Any, key: str, default: Any = None) -> Any:
+        try:
+            if key in attrs:
+                return attrs[key]
+        except Exception:
+            pass
+        return default
 
     def __init__(self):
         raise RuntimeError('Call instance() instead')
@@ -58,9 +77,38 @@ class VectorMapParser:
 
     def get_all_intersections(self) -> Dict[int, str]:
         """
-        - return: Dict[lanelet id: turn_direction type]
+        Return lanelets that belong to explicit map junctions.
+
+        - return: Dict[lanelet id: junction_id]
         """
-        return self.get_attributes(key='turn_direction', attribute_type=str)
+        explicit = self.get_attributes(key='junction_id', attribute_type=str)
+        if explicit:
+            return explicit
+
+        # Fallback for maps without explicit junction_id tags (e.g., sample-map-planning):
+        # treat signal-controlled lanelets as intersection lanelets.
+        inferred: Dict[int, str] = {}
+        try:
+            lanes_by_signal = self.get_lanes_controlled_by_signal()
+            for signal_id, lane_ids in lanes_by_signal.items():
+                for lane_id in lane_ids:
+                    if str(lane_id).isdigit():
+                        inferred[int(lane_id)] = f"signal:{signal_id}"
+        except Exception:
+            pass
+
+        if inferred:
+            return inferred
+
+        # Last-resort heuristic: lanelets with turn_direction are usually in junction areas.
+        for lanelet in self.lanelet_map.laneletLayer:
+            try:
+                turn_direction = str(self._attr_get(lanelet.attributes, "turn_direction", ""))
+            except Exception:
+                turn_direction = ""
+            if turn_direction:
+                inferred[int(lanelet.id)] = "turn_direction"
+        return inferred
 
     def get_lane_boundaries(self) -> dict:
         boundaries = dict()
@@ -81,10 +129,10 @@ class VectorMapParser:
         for reg_elem in self.lanelet_map.regulatoryElementLayer:
             try:
                 # Check if it's a traffic light regulatory element
-                subtype = reg_elem.attributes.get('subtype', '')
+                subtype = str(self._attr_get(reg_elem.attributes, "subtype", ""))
                 if subtype in ['traffic_light', 'virtual_traffic_light']:
                     signal_ids.append(str(reg_elem.id))
-            except (KeyError, AttributeError, TypeError):
+            except (KeyError, AttributeError, TypeError, ValueError):
                 continue
         return signal_ids
 
@@ -227,7 +275,7 @@ class VectorMapParser:
             # Check regulatory elements for traffic lights
             for reg_elem in lanelet.regulatoryElements:
                 try:
-                    subtype = reg_elem.attributes.get('subtype', '')
+                    subtype = str(self._attr_get(reg_elem.attributes, "subtype", ""))
                     if subtype in ['traffic_light', 'virtual_traffic_light']:
                         signal_id = str(reg_elem.id)
                         if signal_id not in lanes_controlled_by_signal:
@@ -238,3 +286,271 @@ class VectorMapParser:
                     continue
         
         return lanes_controlled_by_signal
+
+    def _get_regulatory_element_by_id(self, element_id: str):
+        element_id_int = int(element_id) if str(element_id).isdigit() else None
+        if element_id_int is None:
+            return None
+        try:
+            return self.lanelet_map.regulatoryElementLayer.get(element_id_int)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _linestring_from_any(obj: Any) -> Optional[LineString]:
+        if obj is None:
+            return None
+        try:
+            coords = []
+            for pt in obj:
+                if hasattr(pt, "x") and hasattr(pt, "y"):
+                    coords.append((float(pt.x), float(pt.y)))
+            if len(coords) >= 2:
+                return LineString(coords)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _point_from_any(obj: Any) -> Optional[Point]:
+        if obj is None:
+            return None
+        if hasattr(obj, "x") and hasattr(obj, "y"):
+            try:
+                return Point(float(obj.x), float(obj.y))
+            except Exception:
+                return None
+        return None
+
+    def _get_lanes_controlled_by_regulatory_element(self, reg_elem_id: str) -> List[str]:
+        lane_ids: List[str] = []
+        for lanelet in self.lanelet_map.laneletLayer:
+            for reg_elem in lanelet.regulatoryElements:
+                try:
+                    if str(reg_elem.id) == str(reg_elem_id):
+                        lane_ids.append(str(lanelet.id))
+                        break
+                except Exception:
+                    continue
+        return lane_ids
+
+    def _fallback_stop_line_from_controlled_lanes(self, reg_elem_id: str) -> Optional[LineString]:
+        lane_ids = self._get_lanes_controlled_by_regulatory_element(reg_elem_id)
+        for lane_id in lane_ids:
+            try:
+                lane = self.get_lane_by_id(lane_id)
+                if lane.centerline and len(lane.centerline.coords) >= 2:
+                    p0 = lane.centerline.coords[0]
+                    p1 = lane.centerline.coords[1]
+                    return LineString([p0, p1])
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _parse_local_xy_nodes(root) -> Dict[str, tuple]:
+        nodes: Dict[str, tuple] = {}
+        for node in root.findall("node"):
+            node_id = node.attrib.get("id")
+            if node_id is None:
+                continue
+            local_x = None
+            local_y = None
+            for tag in node.findall("tag"):
+                k = tag.attrib.get("k")
+                if k == "local_x":
+                    local_x = tag.attrib.get("v")
+                elif k == "local_y":
+                    local_y = tag.attrib.get("v")
+            if local_x is None or local_y is None:
+                continue
+            try:
+                nodes[node_id] = (float(local_x), float(local_y))
+            except Exception:
+                continue
+        return nodes
+
+    def _extract_ref_line_from_osm_relation(self, reg_elem_id: str) -> Optional[LineString]:
+        """
+        Extract relation ref_line from the source OSM directly.
+        This avoids false positives caused by lane-centerline fallback when
+        lanelet2 regulatory member access is unavailable in Python bindings.
+        """
+        if not self.map_path:
+            return None
+        try:
+            root = ET.parse(self.map_path).getroot()
+        except Exception:
+            return None
+
+        nodes = self._parse_local_xy_nodes(root)
+        if not nodes:
+            return None
+
+        way_by_id: Dict[str, List[tuple]] = {}
+        for way in root.findall("way"):
+            way_id = way.attrib.get("id")
+            if way_id is None:
+                continue
+            coords: List[tuple] = []
+            for nd in way.findall("nd"):
+                ref = nd.attrib.get("ref")
+                if ref in nodes:
+                    coords.append(nodes[ref])
+            if len(coords) >= 2:
+                way_by_id[way_id] = coords
+
+        relation = None
+        for rel in root.findall("relation"):
+            if rel.attrib.get("id") == str(reg_elem_id):
+                relation = rel
+                break
+        if relation is None:
+            return None
+
+        ref_way_ids: List[str] = []
+        for member in relation.findall("member"):
+            if member.attrib.get("type") != "way":
+                continue
+            if member.attrib.get("role") in ("ref_line", "stop_line", "stopLine"):
+                ref = member.attrib.get("ref")
+                if ref:
+                    ref_way_ids.append(ref)
+
+        for way_id in ref_way_ids:
+            coords = way_by_id.get(way_id)
+            if coords and len(coords) >= 2:
+                try:
+                    return LineString(coords)
+                except Exception:
+                    continue
+        return None
+
+    def _extract_stop_line_for_regulatory_element(
+        self, reg_elem_id: str, strict: bool = False
+    ) -> Optional[LineString]:
+        reg_elem = self._get_regulatory_element_by_id(reg_elem_id)
+        if reg_elem is None:
+            return None
+
+        attr_names = ("stopLine", "stopLines", "refLines")
+        if not strict:
+            attr_names = attr_names + ("refers",)
+
+        for attr_name in attr_names:
+            if not hasattr(reg_elem, attr_name):
+                continue
+            try:
+                value = getattr(reg_elem, attr_name)
+            except Exception:
+                continue
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    continue
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    line = self._linestring_from_any(item)
+                    if line is not None:
+                        return line
+            else:
+                line = self._linestring_from_any(value)
+                if line is not None:
+                    return line
+
+        # Prefer explicit OSM ref_line/stop_line if lanelet2 relation member API is unavailable.
+        osm_ref_line = self._extract_ref_line_from_osm_relation(reg_elem_id)
+        if osm_ref_line is not None:
+            return osm_ref_line
+
+        # Strict mode is used for stop-signs: do not infer stop-lines from lane centerlines.
+        if strict:
+            return None
+
+        return self._fallback_stop_line_from_controlled_lanes(reg_elem_id)
+
+    def get_stop_line_for_signal(self, signal_id: str) -> Optional[LineString]:
+        return self._extract_stop_line_for_regulatory_element(str(signal_id))
+
+    def get_stop_signs(self) -> List[str]:
+        stop_sign_ids: List[str] = []
+        for reg_elem in self.lanelet_map.regulatoryElementLayer:
+            try:
+                subtype = str(self._attr_get(reg_elem.attributes, "subtype", "")).lower()
+            except Exception:
+                continue
+            # Keep candidate set broad for map compatibility, then enforce explicit
+            # stop-line extraction in get_stop_line_for_stop_sign(strict=True).
+            if subtype in ("traffic_sign", "stop_sign", "all_way_stop"):
+                stop_sign_ids.append(str(reg_elem.id))
+        return stop_sign_ids
+
+    def get_stop_sign_by_id(self, stop_sign_id: str) -> StopSign:
+        reg_elem = self._get_regulatory_element_by_id(stop_sign_id)
+        if reg_elem is None:
+            raise ValueError(f"Stop sign {stop_sign_id} not found")
+
+        geometry = None
+        for attr_name in ("refers", "refLines"):
+            if not hasattr(reg_elem, attr_name):
+                continue
+            try:
+                refs = getattr(reg_elem, attr_name)
+            except Exception:
+                continue
+            if callable(refs):
+                try:
+                    refs = refs()
+                except Exception:
+                    continue
+            if refs is None:
+                continue
+            if isinstance(refs, (list, tuple)):
+                for ref in refs:
+                    point = self._point_from_any(ref)
+                    if point is not None:
+                        geometry = point
+                        break
+            else:
+                geometry = self._point_from_any(refs)
+            if geometry is not None:
+                break
+
+        if geometry is None:
+            stop_line = self.get_stop_line_for_stop_sign(stop_sign_id)
+            if stop_line is not None:
+                try:
+                    coords = list(stop_line.coords)
+                    if coords:
+                        geometry = Point(coords[0][0], coords[0][1])
+                except Exception:
+                    geometry = None
+        if geometry is None:
+            lanes = self._get_lanes_controlled_by_regulatory_element(str(stop_sign_id))
+            for lane_id in lanes:
+                try:
+                    lane = self.get_lane_by_id(lane_id)
+                    if lane.centerline and len(lane.centerline.coords) > 0:
+                        first = lane.centerline.coords[0]
+                        geometry = Point(first[0], first[1])
+                        break
+                except Exception:
+                    continue
+        if geometry is None:
+            raise ValueError(f"Could not resolve geometry for stop sign {stop_sign_id}")
+
+        tags: Dict[str, str] = {}
+        try:
+            for key in reg_elem.attributes:
+                tags[key] = str(reg_elem.attributes[key])
+        except Exception:
+            pass
+        return StopSign(id=str(stop_sign_id), geometry=geometry, tags=tags)
+
+    def get_stop_line_for_stop_sign(self, stop_sign_id: str) -> Optional[LineString]:
+        return self._extract_stop_line_for_regulatory_element(
+            str(stop_sign_id), strict=True
+        )

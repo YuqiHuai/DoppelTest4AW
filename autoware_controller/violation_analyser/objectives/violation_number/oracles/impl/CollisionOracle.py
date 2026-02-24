@@ -1,5 +1,5 @@
 from typing import List, Optional, Tuple
-from autoware_perception_msgs.msg import PredictedObjects
+from autoware_perception_msgs.msg import PredictedObjects, ObjectClassification
 from geometry_msgs.msg import Pose, Twist
 from nav_msgs.msg import Odometry
 from objectives.violation_number.oracles.OracleInterface import OracleInterface
@@ -39,6 +39,16 @@ class CollisionOracle(OracleInterface):
         self.excluded_obs = set()
         self.violations = list()
         self.distance_traveled = 0.0
+
+    @staticmethod
+    def _is_pedestrian_label(label: int) -> bool:
+        pedestrian_label = getattr(ObjectClassification, 'PEDESTRIAN', 7)
+        return int(label) == int(pedestrian_label)
+
+    def _collision_main_type(self, obs_type_label: int) -> str:
+        if self._is_pedestrian_label(obs_type_label):
+            return 'CollisionOraclePedestrian'
+        return 'CollisionOracleVehicle'
 
     def get_interested_topics(self):
         return [
@@ -99,11 +109,14 @@ class CollisionOracle(OracleInterface):
                 features['obs_y'] = obs.kinematics.initial_pose_with_covariance.pose.position.y
                 features['obs_heading'] = quaternion_2_heading(obs.kinematics.initial_pose_with_covariance.pose.orientation)
                 features['obs_speed'] = calculate_velocity(obs.kinematics.initial_twist_with_covariance.twist.linear)
-                features['obs_type'] = obs.classification[0].label
+                obs_type_label = (
+                    obs.classification[0].label if len(obs.classification) > 0 else -1
+                )
+                features['obs_type'] = obs_type_label
 
                 self.violations.append(
                     Violation(
-                        'CollisionOracle',
+                        self._collision_main_type(obs_type_label),
                         features,
                         # str(features['obs_id'])
                         str(features['obs_x'])

@@ -26,6 +26,7 @@ from objectives.violation_number.oracles.impl.UnsafeLaneChangeOracle import (
 from objectives.violation_number.oracles.impl.TrafficSignalOracle import (
     TrafficSignalOracle,
 )
+from objectives.violation_number.oracles.impl.StopSignOracle import StopSignOracle
 
 
 def measure_violations(
@@ -42,6 +43,7 @@ def measure_violations(
         UnsafeLaneChangeOracle(),
         JunctionLaneChangeOracle(),
         TrafficSignalOracle(),
+        StopSignOracle(),
     ]
 
     analyzer = RecordAnalyzer(

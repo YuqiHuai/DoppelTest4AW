@@ -1,5 +1,5 @@
 import time
-from typing import List
+from typing import List, Optional, Set
 from datetime import datetime
 from itertools import groupby
 from shapely.geometry import Polygon
@@ -52,11 +52,44 @@ class UnsafeLaneChangeOracle(OracleInterface):
         self.cached_data = dict()
 
         self.searchable_boundary_ids = set(self.boundary_ids)
+        self._active_route_lane_ids: Set[int] = set()
+
+    @staticmethod
+    def _lane_id_from_boundary_id(boundary_id: str) -> Optional[int]:
+        # Boundary IDs are generated as "<lanelet_id>_L" / "<lanelet_id>_R".
+        lane_prefix = str(boundary_id).split("_", 1)[0]
+        if lane_prefix.isdigit():
+            return int(lane_prefix)
+        return None
+
+    def _apply_route_filter_if_needed(self) -> None:
+        route_ids = set()
+        if hasattr(self, "oh") and self.oh:
+            route_ids = self.oh.get_route_lanelet_ids()
+
+        if route_ids == self._active_route_lane_ids:
+            return
+
+        self._active_route_lane_ids = set(route_ids)
+        self.cached_data.clear()
+        self.searchable_boundary_ids = set(self.boundary_ids)
+
+        if not route_ids:
+            return
+
+        filtered = {
+            bid
+            for bid in self.boundary_ids
+            if self._lane_id_from_boundary_id(bid) in route_ids
+        }
+        if filtered:
+            self.searchable_boundary_ids = filtered
 
     @timeit
     def on_new_message(self, topic: str, message, t):
         if not self.oh.has_routing_plan():
             return
+        self._apply_route_filter_if_needed()
         self.count += 1
         if UnsafeLaneChangeOracle.FAST and self.count % 15 != 0:
             return
@@ -119,8 +152,6 @@ class UnsafeLaneChangeOracle(OracleInterface):
                     features = dict(traces[0][3])
                     features["duration"] = delta_t
                     # features["boundary_id"] = self.boundary_ids.index(b_id)
-                    print(self.boundary_ids)
-                    print(self.boundary_ids.index(b_id))
                     violations.append(
                         Violation(
                             "UnsafeLaneChangeOracle",
