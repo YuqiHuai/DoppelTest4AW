@@ -20,6 +20,11 @@ server_globals = {
     "active_map_path": None,
     "sender_process": None,
     "sender_log_file": None,
+    "perception_cache": {},
+    "perception_cache_lock": threading.Lock(),
+    "perception_queue": None,
+    "perception_worker": None,
+    "perception_queue_size": 1000,
     "active_map_name": None,
     "traffic_signal_state": {
         "map_primitive_id": 301,

@@ -42,6 +42,7 @@ from .models import (
     LocalizationInitRequest,
     PedestrianBatchRequest,
     PedestrianPublishRequest,
+    SenderStartRequest,
     SetRoutePointsRequest,
     StartLoggingRequest,
     TrafficSignalRequest,
@@ -61,6 +62,7 @@ from .publishers import (
     _publish_traffic_signals,
     process_perception_request_async,
     publish_pedestrain,
+    update_pedestrians_and_publish,
 )
 from .state import server_globals
 
@@ -75,7 +77,8 @@ async def perception_endpoint(request: Request, background_tasks: BackgroundTask
 
     try:
         request_bytes = await request.body()
-        background_tasks.add_task(process_perception_request_async, request_bytes)
+        source_ip = request.client.host if request.client else None
+        background_tasks.add_task(process_perception_request_async, request_bytes, source_ip)
         return {
             "status": "ok",
             "message": "Perception data received and scheduled for processing.",
@@ -152,31 +155,24 @@ async def publish_pedestrians_endpoint(req: PedestrianBatchRequest):
             )
         orientation = ped.orientation or [0.0, 0.0, 0.0, 1.0]
         dets.append(
-            _build_pedestrian_detected_object(
-                position=(
+            {
+                "pedestrian_id": ped.pedestrian_id,
+                "position": [
                     float(ped.position[0]),
                     float(ped.position[1]),
                     float(ped.position[2]),
-                ),
-                orientation=(
+                ],
+                "orientation": [
                     float(orientation[0]),
                     float(orientation[1]),
                     float(orientation[2]),
                     float(orientation[3]),
-                ),
-                speed_mps=float(ped.speed or 0.0),
-                pedestrian_id=ped.pedestrian_id,
-            )
+                ],
+                "speed": float(ped.speed or 0.0),
+            }
         )
 
-    now = time.time()
-    out = DetectedObjects()
-    out.header = RosStdHeader()
-    out.header.stamp = Time(sec=int(now), nanosec=int((now - int(now)) * 1e9))
-    out.header.frame_id = "map"
-    out.objects = dets
-
-    detection_publisher.publish(out)
+    update_pedestrians_and_publish(dets)
     return {"status": "ok", "message": "Pedestrians published."}
 
 
@@ -426,11 +422,12 @@ async def clear_routes():
 
 
 @router.post("/sender/start")
-async def sender_start():
+async def sender_start(request: SenderStartRequest = SenderStartRequest()):
     node = server_globals.get("node")
     process = server_globals.get("sender_process")
     if process and process.poll() is None:
-        raise HTTPException(status_code=409, detail="Sender is already running.")
+        # Always restart to ensure a fresh sender process.
+        _stop_sender_process("api start (restart)")
 
     sender_path = pathlib.Path(__file__).resolve().parents[1] / "sender.py"
     if not sender_path.exists():
@@ -441,37 +438,98 @@ async def sender_start():
     try:
         env = os.environ.copy()
         env["ROS_DOMAIN_ID"] = os.environ.get("ROS_DOMAIN_ID", "1")
-        if "RECEIVER_URL" in os.environ:
-            env["RECEIVER_URL"] = os.environ["RECEIVER_URL"]
-        if "RECEIVER_URLS" in os.environ:
-            env["RECEIVER_URLS"] = os.environ["RECEIVER_URLS"]
+        receiver_url_source = "unknown"
+        # Cluster defaults.
+        cluster_hosts_preconfigured = "RECEIVER_CLUSTER_HOSTS" in env and bool(
+            str(env.get("RECEIVER_CLUSTER_HOSTS", "")).strip()
+        )
+        env.setdefault(
+            "RECEIVER_CLUSTER_HOSTS",
+            "172.17.0.2,172.17.0.3,172.17.0.4,172.17.0.5,172.17.0.6",
+        )
+        env.setdefault("RECEIVER_PORT", "5002")
+        # Prefer explicit receiver URLs from request for mixed-size runs.
+        explicit_urls = []
+        for url in request.receiver_urls or []:
+            cleaned = str(url).strip()
+            if cleaned:
+                explicit_urls.append(cleaned)
+        if explicit_urls:
+            env["RECEIVER_URLS"] = ",".join(explicit_urls)
+            receiver_url_source = "request.receiver_urls"
+        elif str(env.get("RECEIVER_URLS", "")).strip():
+            receiver_url_source = "env.RECEIVER_URLS"
+        elif str(env.get("RECEIVER_URL", "")).strip():
+            env["RECEIVER_URLS"] = str(env["RECEIVER_URL"]).strip()
+            receiver_url_source = "env.RECEIVER_URL"
+        else:
+            # Compute explicit RECEIVER_URLS to avoid per-container mismatch.
+            try:
+                hosts = [
+                    h.strip()
+                    for h in env.get("RECEIVER_CLUSTER_HOSTS", "").split(",")
+                    if h.strip()
+                ]
+                port = env.get("RECEIVER_PORT", "5002")
+                self_ip = env.get("SELF_IP")
+                if not self_ip:
+                    try:
+                        ips = subprocess.check_output(["hostname", "-I"], text=True).strip().split()
+                        for ip in ips:
+                            if ip and not ip.startswith("127."):
+                                self_ip = ip
+                                break
+                    except Exception:
+                        self_ip = None
+                if self_ip:
+                    env["SELF_IP"] = self_ip
+                urls = []
+                for ip in hosts:
+                    if self_ip and ip == self_ip:
+                        continue
+                    urls.append(f"http://{ip}:{port}/perception")
+                env["RECEIVER_URLS"] = ",".join(urls)
+                receiver_url_source = (
+                    "env.RECEIVER_CLUSTER_HOSTS"
+                    if cluster_hosts_preconfigured
+                    else "built-in Docker bridge defaults (172.17.0.2..172.17.0.6)"
+                )
+            except Exception:
+                pass
+        # Suppress sender stdout/stderr to avoid huge logs.
         log_dir = AUTOWARE_LOG_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_dir / "sender.log", "a", encoding="utf-8")
         process = subprocess.Popen(
             ["python3", str(sender_path)],
             cwd=str(sender_path.parent),
             env=env,
             start_new_session=True,
-            stdout=log_file,
-            stderr=log_file,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         server_globals["sender_process"] = process
-        server_globals["sender_log_file"] = log_file
+        server_globals["sender_log_file"] = None
         if node:
             node.get_logger().info(
                 f"Started sender. PID: {process.pid}, Path: {sender_path}"
             )
+            node.get_logger().info(
+                f"Sender receiver URL source: {receiver_url_source}; "
+                f"receiver_urls={env.get('RECEIVER_URLS', '')}"
+            )
+            if receiver_url_source.startswith("built-in Docker bridge defaults"):
+                node.get_logger().warning(
+                    "Sender started with built-in Docker bridge receiver IP defaults. "
+                    "Pass receiver_urls in /sender/start or set RECEIVER_CLUSTER_HOSTS if your network differs."
+                )
         return {
             "status": "ok",
             "pid": process.pid,
-            "log_file": str(log_dir / "sender.log"),
+            "log_file": None,
+            "receiver_urls": env.get("RECEIVER_URLS", ""),
+            "receiver_url_source": receiver_url_source,
         }
     except Exception as exc:
-        try:
-            log_file.close()
-        except Exception:
-            pass
         if node:
             node.get_logger().error(f"Failed to start sender: {exc}")
         raise HTTPException(
@@ -491,11 +549,11 @@ async def sender_stop():
 
 
 @router.post("/sender/restart")
-async def sender_restart():
+async def sender_restart(request: SenderStartRequest = SenderStartRequest()):
     process = server_globals.get("sender_process")
     if process and process.poll() is None:
         _stop_sender_process("api restart")
-    return await sender_start()
+    return await sender_start(request)
 
 
 @router.get("/sender/status")
@@ -526,20 +584,20 @@ async def autoware_start(request: AutowareLaunchRequest = AutowareLaunchRequest(
     try:
         env = os.environ.copy()
         env["ROS_DOMAIN_ID"] = os.environ.get("ROS_DOMAIN_ID", "1")
+        # Suppress Autoware launch stdout/stderr to avoid huge logs.
         log_dir = AUTOWARE_LOG_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_dir / "autoware_launch.log", "a", encoding="utf-8")
         process = subprocess.Popen(
             command,
             cwd=str(REPO_ROOT),
             env=env,
             start_new_session=True,
-            stdout=log_file,
-            stderr=log_file,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         server_globals["autoware_process"] = process
         server_globals["autoware_launch_cmd"] = command
-        server_globals["autoware_log_file"] = log_file
+        server_globals["autoware_log_file"] = None
         map_dir = map_path.parent if map_path.is_file() else map_path
         server_globals["active_map_name"] = map_dir.name
         server_globals["active_map_path"] = str(map_dir)
@@ -553,13 +611,9 @@ async def autoware_start(request: AutowareLaunchRequest = AutowareLaunchRequest(
             "map_path": str(map_path),
             "vehicle_model": vehicle_model,
             "sensor_model": sensor_model,
-            "log_file": str(log_dir / "autoware_launch.log"),
+            "log_file": None,
         }
     except Exception as exc:
-        try:
-            log_file.close()
-        except Exception:
-            pass
         if node:
             node.get_logger().error(f"Failed to start Autoware launch: {exc}")
         raise HTTPException(

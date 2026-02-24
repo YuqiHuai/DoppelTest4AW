@@ -72,3 +72,7 @@ class TrafficSignalItemRequest(BaseModel):
 
 class TrafficSignalsRequest(BaseModel):
     signals: List[TrafficSignalItemRequest]
+
+
+class SenderStartRequest(BaseModel):
+    receiver_urls: Optional[List[str]] = None

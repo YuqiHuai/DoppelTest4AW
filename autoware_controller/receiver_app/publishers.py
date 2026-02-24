@@ -1,6 +1,10 @@
 import math
 import time
 import uuid
+import os
+import queue
+import threading
+from typing import Any, Dict
 from typing import List, Optional, Tuple
 
 from builtin_interfaces.msg import Time
@@ -26,6 +30,38 @@ from unique_identifier_msgs.msg import UUID
 from modules.localization.proto.localization_pb2 import LocalizationEstimate
 
 from .state import server_globals
+
+_STALE_OBJECT_SEC = 5.0
+
+
+def _ensure_perception_worker():
+    if server_globals.get("perception_queue") is not None:
+        return
+
+    qsize = int(server_globals.get("perception_queue_size") or 200)
+    q = queue.Queue(maxsize=qsize)
+    server_globals["perception_queue"] = q
+
+    def _worker():
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            request_bytes, source_id = item
+            try:
+                loc_estimate = LocalizationEstimate()
+                loc_estimate.ParseFromString(request_bytes)
+                _update_and_publish(loc_estimate, source_id=source_id)
+            except Exception as exc:
+                node = server_globals.get("node")
+                if node:
+                    node.get_logger().error(f"Error processing perception request: {exc}")
+            finally:
+                q.task_done()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    server_globals["perception_worker"] = worker
+    worker.start()
 
 
 def _build_pedestrian_detected_object(
@@ -88,7 +124,7 @@ def _build_pedestrian_detected_object(
     return det
 
 
-async def process_perception_request_async(request_bytes: bytes):
+async def process_perception_request_async(request_bytes: bytes, source_id: Optional[str] = None):
     node = server_globals.get("node")
     if not node:
         print(
@@ -96,15 +132,26 @@ async def process_perception_request_async(request_bytes: bytes):
         )
         return
 
+    _ensure_perception_worker()
+    q = server_globals.get("perception_queue")
+    if not q:
+        return
     try:
-        loc_estimate = LocalizationEstimate()
-        loc_estimate.ParseFromString(request_bytes)
-        publish_perception(loc_estimate)
-    except Exception as exc:
-        node.get_logger().error(f"Error processing perception request: {exc}")
+        q.put_nowait((request_bytes, source_id))
+    except queue.Full:
+        # Drop oldest to avoid backlog/bursty publish.
+        try:
+            _ = q.get_nowait()
+            q.task_done()
+        except Exception:
+            pass
+        try:
+            q.put_nowait((request_bytes, source_id))
+        except Exception:
+            pass
 
 
-def publish_perception(loc: LocalizationEstimate):
+def _build_detected_object(loc: LocalizationEstimate) -> DetectedObject:
     node = server_globals.get("node")
     detection_publisher = server_globals.get("detection_publisher")
     if not node or not detection_publisher:
@@ -182,16 +229,72 @@ def publish_perception(loc: LocalizationEstimate):
         Point32(x=-half_x, y=half_y, z=0.0),
     ]
 
-    ts = float(loc.header.timestamp_sec)
-    sec = int(ts)
-    nanosec = int((ts - sec) * 1e9)
+    # No object_id field in this Autoware message type; skip assigning IDs.
+
+    return det
+
+
+def _update_and_publish(loc: LocalizationEstimate, source_id: Optional[str] = None):
+    node = server_globals.get("node")
+    detection_publisher = server_globals.get("detection_publisher")
+    if not node or not detection_publisher:
+        return
+
+    cache = server_globals.setdefault("perception_cache", {})
+    lock = server_globals.setdefault("perception_cache_lock", threading.Lock())
+
+    key = source_id or "unknown"
+    det = _build_detected_object(loc)
+
+    now = time.time()
+    with lock:
+        cache[key] = (now, det)
+        # Drop stale entries
+        stale_keys = [k for k, (ts, _d) in cache.items() if (now - ts) > _STALE_OBJECT_SEC]
+        for k in stale_keys:
+            cache.pop(k, None)
+        objects = [d for _ts, d in cache.values()]
 
     out = DetectedObjects()
     out.header = RosStdHeader()
-    out.header.stamp = Time(sec=sec, nanosec=nanosec)
+    out.header.stamp = Time(sec=int(now), nanosec=int((now - int(now)) * 1e9))
     out.header.frame_id = "map"
-    out.objects = [det]
+    out.objects = objects
+    detection_publisher.publish(out)
 
+
+def update_pedestrians_and_publish(pedestrians: List[Dict[str, Any]]):
+    node = server_globals.get("node")
+    detection_publisher = server_globals.get("detection_publisher")
+    if not node or not detection_publisher:
+        return
+
+    cache = server_globals.setdefault("perception_cache", {})
+    lock = server_globals.setdefault("perception_cache_lock", threading.Lock())
+
+    now = time.time()
+    with lock:
+        for idx, ped in enumerate(pedestrians):
+            ped_id = ped.get("pedestrian_id") or f"ped_{idx}"
+            det = _build_pedestrian_detected_object(
+                position=tuple(ped["position"]),
+                orientation=tuple(ped.get("orientation") or [0.0, 0.0, 0.0, 1.0]),
+                speed_mps=float(ped.get("speed") or 0.0),
+                pedestrian_id=ped_id,
+            )
+            cache[f"ped:{ped_id}"] = (now, det)
+
+        # Drop stale entries
+        stale_keys = [k for k, (ts, _d) in cache.items() if (now - ts) > _STALE_OBJECT_SEC]
+        for k in stale_keys:
+            cache.pop(k, None)
+        objects = [d for _ts, d in cache.values()]
+
+    out = DetectedObjects()
+    out.header = RosStdHeader()
+    out.header.stamp = Time(sec=int(now), nanosec=int((now - int(now)) * 1e9))
+    out.header.frame_id = "map"
+    out.objects = objects
     detection_publisher.publish(out)
 
 
@@ -200,50 +303,23 @@ def publish_pedestrain(
     speed_mps: float = 0.0,
     pedestrian_id: Optional[str] = None,
 ):
-    node = server_globals.get("node")
-    detection_publisher = server_globals.get("detection_publisher")
-    if not node or not detection_publisher:
-        return
-
-    std_dev_x = 0.03
-    std_dev_y = 0.03
-    std_dev_z = 0.03
-    std_dev_theta = 5.0 * math.pi / 180.0
-
     p = loc.pose.position
     q = loc.pose.orientation
-    det = _build_pedestrian_detected_object(
-        position=(float(p.x), float(p.y), float(p.z)),
-        orientation=(
-            float(q.qx if hasattr(q, "qx") else q.x),
-            float(q.qy if hasattr(q, "qy") else q.y),
-            float(q.qz if hasattr(q, "qz") else q.z),
-            float(q.qw if hasattr(q, "qw") else q.w),
-        ),
-        speed_mps=float(speed_mps),
-        pedestrian_id=pedestrian_id,
+    update_pedestrians_and_publish(
+        [
+            {
+                "pedestrian_id": pedestrian_id or "ped_single",
+                "position": [float(p.x), float(p.y), float(p.z)],
+                "orientation": [
+                    float(q.qx if hasattr(q, "qx") else q.x),
+                    float(q.qy if hasattr(q, "qy") else q.y),
+                    float(q.qz if hasattr(q, "qz") else q.z),
+                    float(q.qw if hasattr(q, "qw") else q.w),
+                ],
+                "speed": float(speed_mps),
+            }
+        ]
     )
-
-    pose_cov = [0.0] * 36
-    pose_cov[0] = std_dev_x**2
-    pose_cov[7] = std_dev_y**2
-    pose_cov[14] = std_dev_z**2
-    pose_cov[35] = std_dev_theta**2
-    det.kinematics.pose_with_covariance.covariance = pose_cov
-    det.kinematics.has_position_covariance = False
-    det.kinematics.orientation_availability = 1
-
-    ts = float(loc.header.timestamp_sec)
-    sec = int(ts)
-    nanosec = int((ts - sec) * 1e9)
-
-    out = DetectedObjects()
-    out.header = RosStdHeader()
-    out.header.stamp = Time(sec=sec, nanosec=nanosec)
-    out.header.frame_id = "map"
-    out.objects = [det]
-
-    detection_publisher.publish(out)
 
 
 def _publish_traffic_signal():

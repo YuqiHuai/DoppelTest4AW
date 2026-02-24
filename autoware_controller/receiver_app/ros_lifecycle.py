@@ -134,6 +134,8 @@ def register_lifecycle_handlers(app: FastAPI) -> None:
         node = server_globals.get("node")
         ros_thread = server_globals.get("ros_thread")
         ros_ok_event = server_globals.get("ros_ok_event")
+        perception_queue = server_globals.get("perception_queue")
+        perception_worker = server_globals.get("perception_worker")
 
         if node:
             node.get_logger().info(f"[{ROS_NODE_NAME_SERVER}] Shutdown initiated...")
@@ -154,6 +156,17 @@ def register_lifecycle_handlers(app: FastAPI) -> None:
         _stop_rosbag_process("shutdown")
         _stop_autoware_process("shutdown")
         _stop_sender_process("shutdown")
+
+        if perception_queue is not None:
+            try:
+                perception_queue.put_nowait(None)
+            except Exception:
+                pass
+        if perception_worker and perception_worker.is_alive():
+            perception_worker.join(timeout=2.0)
+        server_globals["perception_queue"] = None
+        server_globals["perception_worker"] = None
+        server_globals["perception_cache"] = {}
 
         if rclpy.ok():
             if node:
