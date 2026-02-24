@@ -29,8 +29,8 @@ class VehicleEndpoint:
         self,
         name: str,
         base_url: str,
-        timeout: float = 5.0,
-        analysis_timeout: float = 60.0,
+        timeout: float = 30.0,
+        analysis_timeout: float = 120.0,
     ):
         self.name = name
         self.base_url = base_url.rstrip("/")
@@ -62,15 +62,16 @@ class VehicleEndpoint:
             return resp.json()
         return {}
 
-    def reset(self):
-        try:
-            self._post("/logging/stop")
-            time.sleep(3.0)
-        except Exception as exc:
-            if "logging/stop" in str(exc) and "404" in str(exc):
-                pass
-            else:
-                print(f"[{self.name}] reset logging/stop failed: {exc}")
+    def reset(self, stop_logging: bool = True):
+        if stop_logging:
+            try:
+                self._post("/logging/stop")
+                time.sleep(3.0)
+            except Exception as exc:
+                if "logging/stop" in str(exc) and "404" in str(exc):
+                    pass
+                else:
+                    print(f"[{self.name}] reset logging/stop failed: {exc}")
         try:
             self._post("/change_operation_stop_mode")
             time.sleep(3.0)
@@ -114,7 +115,14 @@ class VehicleEndpoint:
         return self._post("/logging/start", {"filename": filename})
 
     def stop_logging(self):
-        return self._post("/logging/stop")
+        try:
+            return self._post("/logging/stop")
+        except Exception as exc:
+            # Idempotent stop: logging might already be stopped during recovery/reset.
+            msg = str(exc)
+            if "logging/stop" in msg and "404" in msg:
+                return {"status": "ok", "message": "logging already stopped"}
+            raise
 
     def start_autoware(
         self,
@@ -133,11 +141,60 @@ class VehicleEndpoint:
             return self._post("/autoware/start", json_body=payload)
         return self._post("/autoware/start")
 
-    def start_sender(self):
-        return self._post("/sender/start")
+    def start_sender(
+        self,
+        receiver_urls: Optional[Sequence[str]] = None,
+    ):
+        payload = {}
+        if receiver_urls is not None:
+            payload["receiver_urls"] = [str(u) for u in receiver_urls]
+        return self._post("/sender/start", payload if payload else None)
 
-    def restart_sender(self):
-        return self._post("/sender/restart")
+    def restart_sender(
+        self,
+        receiver_urls: Optional[Sequence[str]] = None,
+    ):
+        payload = {}
+        if receiver_urls is not None:
+            payload["receiver_urls"] = [str(u) for u in receiver_urls]
+        return self._post("/sender/restart", payload if payload else None)
+
+    def sender_status(self):
+        url = f"{self.base_url}/sender/status"
+        resp = self.session.get(url, timeout=self.timeout)
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            body = resp.text
+            raise RuntimeError(
+                f"{self.name} GET /sender/status failed ({resp.status_code}): {body}"
+            ) from exc
+        if resp.content:
+            return resp.json()
+        return {}
+
+    def stop_sender(self):
+        try:
+            return self._post("/sender/stop")
+        except Exception as exc:
+            msg = str(exc)
+            if "/sender/stop" in msg and "404" in msg:
+                return {"status": "ok", "message": "sender already stopped"}
+            raise
+
+    def autoware_status(self):
+        url = f"{self.base_url}/autoware/status"
+        resp = self.session.get(url, timeout=self.timeout)
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            body = resp.text
+            raise RuntimeError(
+                f"{self.name} GET /autoware/status failed ({resp.status_code}): {body}"
+            ) from exc
+        if resp.content:
+            return resp.json()
+        return {}
 
     def publish_pedestrian(self, payload: dict):
         return self._post("/publish_pedestrain", payload)
@@ -227,7 +284,8 @@ class ScenarioRunner:
         self.is_initialized = False
         ScenarioRunner.__instance = self
         self._pedestrian_ids: List[str] = []
-        self._restart_wait_s = 120.0
+        self._restart_wait_s = 60.0
+        self._max_recovery_retries = 3
         self._autoware_started = False
         self._sender_started = False
         self._repo_root = Path(__file__).resolve().parents[3]
@@ -251,9 +309,10 @@ class ScenarioRunner:
         return str(map_dir)
 
     def configure_recovery(
-        self, restart_wait_s: float = 120.0
+        self, restart_wait_s: float = 60.0, max_recovery_retries: int = 3
     ) -> None:
         self._restart_wait_s = float(restart_wait_s)
+        self._max_recovery_retries = max(0, int(max_recovery_retries))
 
     def _is_autonomous_mode_unavailable(self, exc: Exception) -> bool:
         message = str(exc)
@@ -266,6 +325,19 @@ class ScenarioRunner:
     def _is_sender_already_running(self, exc: Exception) -> bool:
         message = str(exc)
         return "409" in message and "Sender" in message and "already running" in message
+
+    @staticmethod
+    def _perception_url(base_url: str) -> str:
+        return f"{base_url.rstrip('/')}/perception"
+
+    def _sender_peer_urls(
+        self, active_vehicles: Sequence[VehicleEndpoint], vehicle_idx: int
+    ) -> List[str]:
+        return [
+            self._perception_url(v.base_url)
+            for idx, v in enumerate(active_vehicles)
+            if idx != vehicle_idx
+        ]
 
     def _start_auto_mode_with_recovery(
         self, 
@@ -284,9 +356,9 @@ class ScenarioRunner:
             start_flags: List of flags indicating which vehicles have already started
             
         Returns:
-            Tuple of (restart_needed, other_vehicles_were_stopped)
-            - restart_needed: True if restart was needed, False otherwise
-            - other_vehicles_were_stopped: True if other vehicles were stopped for sync
+            Tuple of (restart_needed, restart_scenario_from_t0)
+            - restart_needed: True if recovery/restart was performed, False otherwise
+            - restart_scenario_from_t0: True when scenario timing should restart from 0
         """
         try:
             vehicle.start_auto_mode()
@@ -294,36 +366,23 @@ class ScenarioRunner:
         except Exception as exc:
             if not self._is_autonomous_mode_unavailable(exc):
                 raise
-            
-            # Check if other vehicles have already started
-            other_vehicles_started = any(
-                start_flags[i] for i in range(len(start_flags)) if i != vehicle_idx
+
+            self.logger.warning(
+                "[%s] auto mode unavailable; restarting Autoware and rerunning scenario from t=0.",
+                vehicle.name,
             )
-            
-            if other_vehicles_started:
-                self.logger.warning(
-                    "[%s] auto mode unavailable; other vehicles already started. "
-                    "Stopping all vehicles for synchronized restart.",
-                    vehicle.name,
-                )
-                # Stop all vehicles that have started
-                for idx, (v, _adc) in enumerate(active_runs):
-                    if start_flags[idx]:
-                        try:
-                            self.logger.info("[%s] Stopping vehicle for synchronized restart.", v.name)
-                            v.stop()
-                        except Exception as stop_exc:
-                            self.logger.warning("[%s] stop failed: %s", v.name, stop_exc)
-                # Reset start flags for all vehicles
-                for idx in range(len(start_flags)):
-                    start_flags[idx] = False
-                self.logger.info("All vehicles stopped. Proceeding with restart and reconfiguration.")
-            else:
-                self.logger.warning(
-                    "[%s] auto mode unavailable; restarting Autoware (no other vehicles started yet).",
-                    vehicle.name,
-                )
-            
+            # Stop any vehicles that already entered AUTO before rerun.
+            for idx, (v, _adc) in enumerate(active_runs):
+                if not start_flags[idx]:
+                    continue
+                try:
+                    self.logger.info("[%s] Stopping vehicle before rerun.", v.name)
+                    v.stop()
+                except Exception as stop_exc:
+                    self.logger.warning("[%s] stop failed: %s", v.name, stop_exc)
+            for idx in range(len(start_flags)):
+                start_flags[idx] = False
+
             # Restart the failed vehicle's Autoware
             try:
                 vehicle.restart_autoware()
@@ -339,31 +398,28 @@ class ScenarioRunner:
             time.sleep(self._restart_wait_s)
             self.logger.info("[%s] restart wait complete.", vehicle.name)
             
-            # Restart sender processes for all vehicles
-            self.logger.info("Restarting sender processes after Autoware restart.")
-            for v in self.vehicles:
+            # Refresh sender peer wiring after recovery.
+            active_vehicles = [v for v, _ in active_runs]
+            self.logger.info("Restarting sender for all active vehicles after Autoware restart.")
+            for idx, v in enumerate(active_vehicles):
                 try:
-                    v.restart_sender()
+                    v.restart_sender(
+                        receiver_urls=self._sender_peer_urls(active_vehicles, idx),
+                    )
                 except Exception as sender_exc:
-                    if self._is_sender_already_running(sender_exc):
-                        continue
-                    self.logger.warning("[%s] sender restart failed: %s", v.name, sender_exc)
-            self.logger.info("Sender restart requested; waiting 10s for startup.")
-            time.sleep(10.0)
+                    self.logger.warning("[%s] sender ensure failed: %s", v.name, sender_exc)
+            self.logger.info("Sender restart requested; waiting 2s for startup.")
+            time.sleep(2.0)
             self._sender_started = True
-            
-            # If other vehicles were stopped, we need to reconfigure them
-            if other_vehicles_started:
-                self.logger.info("Reconfiguring all vehicles after restart...")
-                for idx, (v, adc) in enumerate(active_runs):
-                    self.logger.info("[%s] Reconfiguring vehicle after restart.", v.name)
-                    self._configure_vehicle(v, adc)
-                self.logger.info("All vehicles reconfigured. Ready to restart auto mode.")
-            
-            # Retry auto mode after recovery
-            self.logger.info("[%s] Retrying auto mode after recovery.", vehicle.name)
-            vehicle.start_auto_mode()
-            return (True, other_vehicles_started)  # Restart was needed
+
+            # After Autoware restart, localization/routes are lost: reconfigure all vehicles.
+            self.logger.info("Reconfiguring all vehicles after restart...")
+            for idx, (v, adc) in enumerate(active_runs):
+                self.logger.info("[%s] Reconfiguring vehicle after restart.", v.name)
+                self._configure_vehicle(v, adc, stop_logging_on_reset=False)
+            self.logger.info("All vehicles reconfigured.")
+
+            return (True, True)
 
     @staticmethod
     def get_instance() -> "ScenarioRunner":
@@ -423,7 +479,9 @@ class ScenarioRunner:
         ]
         self.is_initialized = True
 
-    def _publish_traffic_signals(self, curr_time: float):
+    def _publish_traffic_signals(
+        self, curr_time: float, target_vehicles: Optional[Sequence[VehicleEndpoint]] = None
+    ):
         config = self.tm.get_traffic_configuration(curr_time)
         signals_payload = []
         for signal in config.get("signals", []):
@@ -446,14 +504,17 @@ class ScenarioRunner:
         if not signals_payload:
             return
         payload = {"signals": signals_payload}
-        for vehicle in self.vehicles:
+        vehicles = list(target_vehicles) if target_vehicles is not None else self.vehicles
+        for vehicle in vehicles:
             try:
                 vehicle.publish_traffic_signals(payload)
             except Exception:
                 for signal_payload in signals_payload:
                     vehicle.publish_traffic_signal(signal_payload)
 
-    def _publish_pedestrians(self, curr_time: float):
+    def _publish_pedestrians(
+        self, curr_time: float, target_vehicles: Optional[Sequence[VehicleEndpoint]] = None
+    ):
         pedestrians = self.pm.get_pedestrians(curr_time)
         items = []
         for idx, obs in enumerate(pedestrians):
@@ -490,19 +551,25 @@ class ScenarioRunner:
         if not items:
             return
         payload = {"pedestrians": items}
-        for vehicle in self.vehicles:
+        vehicles = list(target_vehicles) if target_vehicles is not None else self.vehicles
+        for vehicle in vehicles:
             try:
                 vehicle.publish_pedestrians(payload)
             except Exception as exc:
                 self.logger.warning("[%s] publish_pedestrians failed: %s", vehicle.name, exc)
 
-    def _configure_vehicle(self, vehicle: VehicleEndpoint, adc: ADAgent):
+    def _configure_vehicle(
+        self,
+        vehicle: VehicleEndpoint,
+        adc: ADAgent,
+        stop_logging_on_reset: bool = True,
+    ):
         start_pose = _pose_payload(adc.start_pose)
         goal_pose = _pose_payload(adc.goal_pose)
         self.logger.info(
             "[%s] configure start (reset/localization/route)", vehicle.name
         )
-        vehicle.reset()
+        vehicle.reset(stop_logging=stop_logging_on_reset)
         self.logger.info("[%s] reset done", vehicle.name)
         vehicle.initialize_localization(start_pose)
         self.logger.info("[%s] initialize_localization done", vehicle.name)
@@ -523,132 +590,143 @@ class ScenarioRunner:
             raise ValueError(
                 f"Scenario requires {len(adcs)} vehicles but only {len(self.vehicles)} endpoints provided."
             )
+        active_vehicles = self.vehicles[: len(adcs)]
+        inactive_vehicles = self.vehicles[len(adcs):]
 
         scenario_logger = _get_scenario_logger()
         scenario_logger.info(
             f"Scenario start: {generation_name} {scenario_name} "
             f"(limit={SCENARIO_UPPER_LIMIT}s)"
         )
-        if not self._autoware_started:
-            scenario_logger.info("Starting Autoware for all vehicles...")
-            autoware_map_path = self._resolve_autoware_map_path()
-            for vehicle in self.vehicles:
-                try:
-                    vehicle.start_autoware(map_path=autoware_map_path)
-                except Exception as exc:
-                    if self._is_autoware_already_running(exc):
-                        scenario_logger.info(
-                            "[%s] Autoware already running; continuing.",
-                            vehicle.name,
-                        )
-                        continue
-                    raise
+        scenario_logger.info("Active vehicles this scenario: %s", len(active_vehicles))
+        # Mixed-size runs require per-scenario startup checks.
+        scenario_logger.info("Ensuring Autoware is running for active vehicles...")
+        autoware_map_path = self._resolve_autoware_map_path()
+        started_any_autoware = False
+        for vehicle in active_vehicles:
+            try:
+                vehicle.start_autoware(map_path=autoware_map_path)
+                scenario_logger.info("[%s] Autoware start requested.", vehicle.name)
+                started_any_autoware = True
+            except Exception as exc:
+                if self._is_autoware_already_running(exc):
+                    scenario_logger.info(
+                        "[%s] Autoware already running; continuing.",
+                        vehicle.name,
+                    )
+                    continue
+                raise
+        if started_any_autoware:
             scenario_logger.info(
                 "Autoware start requested; waiting %ss for startup.",
                 self._restart_wait_s,
             )
             time.sleep(self._restart_wait_s)
-            self._autoware_started = True
-        if not self._sender_started:
-            scenario_logger.info("Starting sender for all vehicles...")
-            for vehicle in self.vehicles:
-                try:
-                    vehicle.start_sender()
-                except Exception as exc:
-                    if self._is_sender_already_running(exc):
-                        scenario_logger.info("[%s] Sender already running; continuing.", vehicle.name)
-                        continue
-                    raise
-            scenario_logger.info("Sender start requested; waiting 10s for startup.")
+        else:
+            scenario_logger.info("Autoware already running on active vehicles; waiting 10s.")
             time.sleep(10.0)
-            self._sender_started = True
+        self._autoware_started = True
+
+        if inactive_vehicles:
+            scenario_logger.info("Stopping sender on inactive vehicles...")
+            for vehicle in inactive_vehicles:
+                try:
+                    vehicle.stop_sender()
+                except Exception as exc:
+                    scenario_logger.warning("[%s] sender stop failed: %s", vehicle.name, exc)
+
+        scenario_logger.info("Refreshing sender peer URLs for active vehicles...")
+        for idx, vehicle in enumerate(active_vehicles):
+            try:
+                vehicle.restart_sender(
+                    receiver_urls=self._sender_peer_urls(active_vehicles, idx),
+                )
+                scenario_logger.info("[%s] sender restarted.", vehicle.name)
+            except Exception as exc:
+                scenario_logger.warning("[%s] sender restart failed: %s", vehicle.name, exc)
+                raise
+        scenario_logger.info("Sender restart requested; waiting 2s for startup.")
+        time.sleep(2.0)
+        self._sender_started = True
         active_runs: List[Tuple[VehicleEndpoint, ADAgent]] = []
         for idx, adc in enumerate(adcs):
-            vehicle = self.vehicles[idx]
+            vehicle = active_vehicles[idx]
             self._configure_vehicle(vehicle, adc)
             active_runs.append((vehicle, adc))
 
-        scenario_logger.info("Restarting sender for all vehicles before auto mode...")
-        for vehicle in self.vehicles:
-            try:
-                vehicle.restart_sender()
-            except Exception as exc:
-                scenario_logger.warning("[%s] sender restart failed: %s", vehicle.name, exc)
-        scenario_logger.info("Sender restart requested; waiting 10s for startup.")
-        time.sleep(10.0)
-
-        if save_record and active_runs:
+        def _start_logging_for_active_runs() -> None:
+            if not save_record or not active_runs:
+                return
             log_ts = int(time.time())
             for vehicle, _adc in active_runs:
                 log_name = f"{generation_name}_{scenario_name}_{vehicle.name}_{log_ts}"
                 vehicle.start_logging(log_name)
 
+        _start_logging_for_active_runs()
+
         start_flags = [False] * len(active_runs)
         scenario_start = time.time()
         runner_time = 0.0
         next_log_time = 0.0
+        recovery_attempts = 0
+        fatal_error: Optional[Exception] = None
 
         while True:
             elapsed = time.time() - scenario_start
             runner_time = elapsed
+            recovery_triggered = False
             for idx, (vehicle, adc) in enumerate(active_runs):
                 if not start_flags[idx] and elapsed >= adc.start_t:
-                    # Record scenario time BEFORE restart (in case restart pauses scenario time)
-                    scenario_time_before_restart = runner_time
-                    restart_needed, other_vehicles_stopped = self._start_auto_mode_with_recovery(
+                    restart_needed, restart_from_t0 = self._start_auto_mode_with_recovery(
                         vehicle, idx, active_runs, start_flags
                     )
                     if restart_needed:
-                        if other_vehicles_stopped:
-                            # If other vehicles were stopped, we paused scenario time during restart
-                            # Adjust scenario_start so that elapsed time continues from where it paused
-                            # This ensures the scenario still runs for exactly SCENARIO_UPPER_LIMIT seconds
-                            # The restart took real time, but scenario time should continue from where it paused
-                            scenario_start = time.time() - scenario_time_before_restart
-                            scenario_logger.info(
-                                "Scenario time paused during restart. Resuming from t=%.1fs "
-                                "(restart took real time but scenario time paused)",
-                                scenario_time_before_restart,
-                            )
-                            # Restart other vehicles that should have already started
-                            # Note: All vehicles were reconfigured in _start_auto_mode_with_recovery
-                            for other_idx, (other_vehicle, other_adc) in enumerate(active_runs):
-                                if other_idx != idx and not start_flags[other_idx]:
-                                    # Check if this vehicle's start time has passed
-                                    if runner_time >= other_adc.start_t:
-                                        scenario_logger.info(
-                                            "[%s] Restarting auto mode after synchronized restart "
-                                            "(start_t=%.1fs, scenario_time=%.1fs).",
-                                            other_vehicle.name,
-                                            other_adc.start_t,
-                                            runner_time,
-                                        )
-                                        try:
-                                            other_vehicle.start_auto_mode()
-                                            start_flags[other_idx] = True
-                                            scenario_logger.info(
-                                                "[%s] Successfully restarted auto mode after recovery.",
-                                                other_vehicle.name,
-                                            )
-                                        except Exception as restart_exc:
-                                            scenario_logger.error(
-                                                "[%s] Failed to restart auto mode after recovery: %s",
-                                                other_vehicle.name,
-                                                restart_exc,
-                                            )
-                                            # Don't set start_flags[other_idx] = True, so it will retry
-                                            # But this could cause infinite loop, so we might want to handle this differently
-                        # Mark the current vehicle as started (it was restarted in _start_auto_mode_with_recovery)
-                        start_flags[idx] = True
-                        scenario_logger.info(
-                            "[%s] Marked as started after recovery.",
-                            vehicle.name,
+                        recovery_attempts += 1
+                        scenario_logger.warning(
+                            "Recovery attempt %s/%s for %s %s.",
+                            recovery_attempts,
+                            self._max_recovery_retries,
+                            generation_name,
+                            scenario_name,
                         )
+                        if recovery_attempts >= self._max_recovery_retries:
+                            fatal_error = AutoModeUnavailableError(
+                                f"Exceeded max recovery retries ({self._max_recovery_retries}) "
+                                f"for {generation_name} {scenario_name}."
+                            )
+                            scenario_logger.error(str(fatal_error))
+                            break
+                        if restart_from_t0:
+                            if save_record and active_runs:
+                                scenario_logger.warning(
+                                    "Recovery triggered; discarding partial recording and starting a fresh recording."
+                                )
+                                for v, _ in active_runs:
+                                    try:
+                                        v.stop_logging()
+                                    except Exception as exc:
+                                        scenario_logger.warning(
+                                            "[%s] stop_logging failed during recovery: %s", v.name, exc
+                                        )
+                                _start_logging_for_active_runs()
+                            scenario_start = time.time()
+                            runner_time = 0.0
+                            next_log_time = 0.0
+                            scenario_logger.warning(
+                                "Recovery completed; restarting scenario timing from t=0."
+                            )
+                        recovery_triggered = True
+                        break
                     else:
                         start_flags[idx] = True
 
-            self._publish_traffic_signals(runner_time)
-            self._publish_pedestrians(runner_time)
+            if fatal_error is not None:
+                break
+            if recovery_triggered:
+                continue
+
+            self._publish_traffic_signals(runner_time, target_vehicles=active_vehicles)
+            self._publish_pedestrians(runner_time, target_vehicles=active_vehicles)
 
             if runner_time >= next_log_time:
                 scenario_logger.info(f"Scenario time: {round(next_log_time, 1)}.")
@@ -661,9 +739,17 @@ class ScenarioRunner:
             time.sleep(0.01)
 
         for vehicle, _adc in active_runs:
-            vehicle.stop()
+            try:
+                vehicle.stop()
+            except Exception as exc:
+                scenario_logger.warning("[%s] stop failed during cleanup: %s", vehicle.name, exc)
             if save_record:
-                vehicle.stop_logging()
+                try:
+                    vehicle.stop_logging()
+                except Exception as exc:
+                    scenario_logger.warning(
+                        "[%s] stop_logging failed during cleanup: %s", vehicle.name, exc
+                    )
 
         scenario_logger.info(
             f"Scenario end: {generation_name} {scenario_name} "
@@ -671,6 +757,8 @@ class ScenarioRunner:
         )
         self.logger.debug(f"Scenario ended. Length: {round(runner_time, 2)} seconds.")
         self.is_initialized = False
+        if fatal_error is not None:
+            raise fatal_error
         return active_runs
 
 

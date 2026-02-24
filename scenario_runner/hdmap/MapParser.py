@@ -829,45 +829,31 @@ class MapParser:
     def get_coordinate_and_heading(
         self, lane_id: str, s: float
     ) -> Tuple[PointENU, float]:
-        lst = self.get_lane_central_curve(lane_id)
-        coords = list(lst.coords)
-        if len(coords) < 2:
-            return (PointENU(x=coords[0][0], y=coords[0][1]), 0.0)
+        line = self.get_lane_central_curve(lane_id)
+        if line.is_empty:
+            return (PointENU(x=0.0, y=0.0), 0.0)
 
-        seg_lengths = []
-        total = 0.0
-        for i in range(len(coords) - 1):
-            x1, y1 = coords[i]
-            x2, y2 = coords[i + 1]
-            length = math.hypot(x2 - x1, y2 - y1)
-            seg_lengths.append(length)
-            total += length
+        total = max(float(line.length), 1e-6)
+        target = min(max(float(s), 0.0), total)
+        p = line.interpolate(target)
 
-        target = min(max(s, 0.0), total)
-        acc = 0.0
-        idx = 0
-        for i, length in enumerate(seg_lengths):
-            if acc + length >= target:
-                idx = i
-                break
-            acc += length
+        # Estimate tangent using nearby points in the lane-forward direction.
+        eps = min(0.5, max(0.05, total * 0.001))
+        s_prev = max(0.0, target - eps)
+        s_next = min(total, target + eps)
+        p_prev = line.interpolate(s_prev)
+        p_next = line.interpolate(s_next)
 
-        remaining = target - acc
-        seg_len = max(seg_lengths[idx], 1e-6)
-        if remaining > (seg_len / 2.0):
-            snap_idx = idx + 1
-            orient_idx1 = idx + 1
-            orient_idx2 = idx + 2 if idx + 2 < len(coords) else idx
-        else:
-            snap_idx = idx
-            orient_idx1 = idx
-            orient_idx2 = idx + 1
-
-        x, y = coords[snap_idx]
-        x1, y1 = coords[orient_idx1]
-        x2, y2 = coords[orient_idx2]
-        heading = math.atan2(y2 - y1, x2 - x1)
-        return (PointENU(x=x, y=y), heading)
+        dx = p_next.x - p_prev.x
+        dy = p_next.y - p_prev.y
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            # Degenerate local segment; fall back to lane endpoints.
+            start = line.interpolate(0.0)
+            end = line.interpolate(total)
+            dx = end.x - start.x
+            dy = end.y - start.y
+        heading = math.atan2(dy, dx)
+        return (PointENU(x=float(p.x), y=float(p.y), z=0.0), heading)
 
     def get_junctions(self) -> List[str]:
         return list(self.__junctions.keys())

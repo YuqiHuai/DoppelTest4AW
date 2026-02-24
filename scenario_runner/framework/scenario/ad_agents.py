@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 from random import randint, random
 from secrets import choice
@@ -12,7 +13,7 @@ from scenario_runner.hdmap.MapParser import MapParser
 
 DEFAULT_MAP = "autoware_map/sample-map-planning/lanelet2_map.osm"
 INSTANCE_MAX_WAIT_TIME = 15
-MAX_ADC_COUNT = 3
+MAX_ADC_COUNT = 5
 
 # Vehicle dimensions (matching DoppelTest/Apollo)
 VEHICLE_LENGTH = 4.933
@@ -298,8 +299,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--vehicle-url",
-        default="http://172.17.0.2:5002",
-        help="HTTP base URL for container1.",
+        default=os.environ.get("AUTOWARE_RECEIVER_URL", "http://172.17.0.2:5002"),
+        help=(
+            "HTTP base URL for one receiver (default: AUTOWARE_RECEIVER_URL or "
+            "Docker bridge example http://172.17.0.2:5002)."
+        ),
     )
     parser.add_argument(
         "--delay",

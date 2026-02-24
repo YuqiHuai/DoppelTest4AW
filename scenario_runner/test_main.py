@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
@@ -173,7 +174,9 @@ def _build_random_conflict_scenario(
     )
 
 
-def _mut_ad_section(section: ADSection, map_path: str) -> ADSection:
+def _mut_ad_section(
+    section: ADSection, map_path: str, max_adc_count: int = MAX_ADC_COUNT
+) -> ADSection:
     mut_pb = random()
     if mut_pb < 0.1 and len(section.adcs) > 2:
         shuffle(section.adcs)
@@ -182,7 +185,7 @@ def _mut_ad_section(section: ADSection, map_path: str) -> ADSection:
         return section
 
     trial = 0
-    if mut_pb < 0.4 and len(section.adcs) < MAX_ADC_COUNT:
+    if mut_pb < 0.4 and len(section.adcs) < max_adc_count:
         while True:
             new_ad = ADAgent.get_one(
                 map_path=map_path, must_not_start_from_junction=True
@@ -247,10 +250,14 @@ def _mut_tc_section(section: TCSection, map_path: str) -> TCSection:
     return TCSection.get_one(map_path=map_path)
 
 
-def mut_scenario(ind: Scenario, map_path: str) -> Tuple[Scenario]:
+def mut_scenario(
+    ind: Scenario, map_path: str, max_adc_count: int = MAX_ADC_COUNT
+) -> Tuple[Scenario]:
     mut_pb = random()
     if mut_pb < 1 / 3:
-        ind.ad_section = _mut_ad_section(ind.ad_section, map_path)
+        ind.ad_section = _mut_ad_section(
+            ind.ad_section, map_path, max_adc_count=max_adc_count
+        )
     elif mut_pb < 2 / 3:
         ind.pd_section = _mut_pd_section(ind.pd_section, map_path)
     else:
@@ -271,7 +278,10 @@ def _get_route_str(adc: ADAgent) -> str:
 
 
 def _cx_ad_section(
-    ind1: ADSection, ind2: ADSection, map_path: str
+    ind1: ADSection,
+    ind2: ADSection,
+    map_path: str,
+    max_adc_count: int = MAX_ADC_COUNT,
 ) -> Tuple[ADSection, ADSection]:
     """Crossover for AD sections - matching original Apollo GA."""
     # swap entire ad section with 5% probability
@@ -299,7 +309,7 @@ def _cx_ad_section(
         return ind1, ind2
 
     # Try to add a conflicting agent from parent 2 to parent 1
-    if len(ind1.adcs) < MAX_ADC_COUNT:
+    if len(ind1.adcs) < max_adc_count:
         for adc in ind2.adcs:
             if ind1.has_conflict(adc, map_path=map_path) and ind1.add_agent(
                 deepcopy(adc)
@@ -312,19 +322,19 @@ def _cx_ad_section(
     # combine to make a new population
     available_adcs = ind1.adcs + ind2.adcs
     shuffle(available_adcs)
-    split_index = randint(2, min(len(available_adcs), MAX_ADC_COUNT))
+    split_index = randint(2, min(len(available_adcs), max_adc_count))
 
     result1 = ADSection([])
     # Only add agents that are not too close to existing ones
     for x in available_adcs[:split_index]:
         if result1.add_agent(deepcopy(x)):
             # Successfully added
-            if len(result1.adcs) >= MAX_ADC_COUNT:
+            if len(result1.adcs) >= max_adc_count:
                 break
         # If add_agent returns False (too close), skip this agent
 
     # make sure offspring adc count is valid
-    while len(result1.adcs) > MAX_ADC_COUNT:
+    while len(result1.adcs) > max_adc_count:
         result1.adcs.pop()
 
     trial = 0
@@ -382,13 +392,16 @@ def _cx_tc_section(
 
 
 def cx_scenario(
-    ind1: Scenario, ind2: Scenario, map_path: str
+    ind1: Scenario,
+    ind2: Scenario,
+    map_path: str,
+    max_adc_count: int = MAX_ADC_COUNT,
 ) -> Tuple[Scenario, Scenario]:
     """Crossover scenarios - matching original Apollo GA."""
     cx_pb = random()
     if cx_pb < 0.6:
         ind1.ad_section, ind2.ad_section = _cx_ad_section(
-            ind1.ad_section, ind2.ad_section, map_path
+            ind1.ad_section, ind2.ad_section, map_path, max_adc_count=max_adc_count
         )
     elif cx_pb < 0.8:
         ind1.pd_section, ind2.pd_section = _cx_pd_section(
@@ -413,7 +426,28 @@ def main() -> None:
         action="append",
         dest="urls",
         default=[],
-        help="Autoware receiver base URL (repeatable).",
+        help=(
+            "Autoware receiver base URL (repeatable). "
+            "If omitted, uses AUTOWARE_RECEIVER_URLS or Docker-bridge examples."
+        ),
+    )
+    parser.add_argument(
+        "--num-vehicles",
+        type=int,
+        default=None,
+        help="Fixed number of vehicles per scenario (optional).",
+    )
+    parser.add_argument(
+        "--min-vehicles",
+        type=int,
+        default=2,
+        help="Minimum vehicles per scenario when using mixed-size generation.",
+    )
+    parser.add_argument(
+        "--max-vehicles",
+        type=int,
+        default=5,
+        help="Maximum vehicles per scenario when using mixed-size generation.",
     )
     parser.add_argument(
         "--map",
@@ -440,14 +474,29 @@ def main() -> None:
     )
     parser.add_argument(
         "--log-dir",
-        default="scenario_runs_0128_sample_map_planning",
+        default="scenario_runs",
         help="Directory to store scenario run metadata.",
     )
     parser.add_argument(
         "--restart-wait",
         type=float,
-        default=120.0,
+        default=60.0,
         help="Seconds to wait after Autoware restart before retrying auto mode.",
+    )
+    parser.add_argument(
+        "--max-recovery-retries",
+        type=int,
+        default=3,
+        help="Maximum per-scenario auto-mode recovery retries before marking scenario failed.",
+    )
+    parser.add_argument(
+        "--max-discard-regenerations",
+        type=int,
+        default=10,
+        help=(
+            "Maximum times to discard and regenerate a scenario in-place when "
+            "recovery retry limit is exceeded."
+        ),
     )
     parser.add_argument(
         "--conflict-only",
@@ -463,21 +512,59 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Always plan for exactly 3 Autoware instances (vehicles).
-    # If the user provides fewer URLs, we fall back to the defaults.
-    # If they provide more, we only use the first 3.
-    default_urls: List[str] = [
-        "http://172.17.0.2:5002",
-        "http://172.17.0.3:5002",
-        "http://172.17.0.4:5002",
-    ]
-    urls: List[str] = args.urls or default_urls
-    NUM_VEHICLES = 3
-    if len(urls) < NUM_VEHICLES:
-        # Not enough URLs – pad with defaults (avoids silent 2-vehicle runs)
-        urls = (urls + default_urls)[:NUM_VEHICLES]
-    elif len(urls) > NUM_VEHICLES:
-        urls = urls[:NUM_VEHICLES]
+    # Default cluster URLs (override with AUTOWARE_RECEIVER_URLS or --url).
+    default_urls_env = os.environ.get("AUTOWARE_RECEIVER_URLS", "").strip()
+    if default_urls_env:
+        default_urls = [
+            u.strip().rstrip("/")
+            for u in default_urls_env.split(",")
+            if u.strip()
+        ]
+    else:
+        default_urls = [
+            "http://172.17.0.2:5002",
+            "http://172.17.0.3:5002",
+            "http://172.17.0.4:5002",
+            "http://172.17.0.5:5002",
+            "http://172.17.0.6:5002",
+        ]
+    if args.num_vehicles is not None:
+        if int(args.num_vehicles) < 2:
+            raise ValueError("--num-vehicles must be >= 2.")
+        min_vehicles = int(args.num_vehicles)
+        max_vehicles = int(args.num_vehicles)
+    else:
+        min_vehicles = max(2, int(args.min_vehicles))
+        max_vehicles = max(min_vehicles, int(args.max_vehicles))
+
+    url_pool: List[str] = [str(u).rstrip("/") for u in (args.urls or [])]
+    if len(url_pool) < max_vehicles:
+        # Not enough URLs: pad from defaults while preserving given order.
+        seen = set(url_pool)
+        for default_url in default_urls:
+            if default_url not in seen:
+                url_pool.append(default_url)
+                seen.add(default_url)
+            if len(url_pool) >= max_vehicles:
+                break
+        if len(url_pool) < max_vehicles:
+            raise ValueError(
+                f"Need {max_vehicles} URLs but only {len(url_pool)} available. "
+                "Pass more --url entries."
+            )
+    urls: List[str] = url_pool[:max_vehicles]
+    print(
+        f"[GA] Vehicle count mode: min={min_vehicles}, max={max_vehicles}",
+        flush=True,
+    )
+    if not args.urls and not default_urls_env:
+        print(
+            "[GA][WARN] Using built-in Docker bridge example URLs "
+            "(172.17.0.2..172.17.0.6). If your container IPs differ, pass "
+            "--url multiple times or set AUTOWARE_RECEIVER_URLS.",
+            flush=True,
+        )
+    print(f"[GA] Receiver endpoints: {urls}", flush=True)
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "test_main.log"
@@ -522,10 +609,13 @@ def main() -> None:
             "uid": scenario.uid,
         }
 
-    # Create exactly NUM_VEHICLES endpoints
+    # Create endpoints for the maximum configured vehicle count.
     endpoints = [VehicleEndpoint(f"vehicle_{i}", url) for i, url in enumerate(urls)]
     runner = ScenarioRunner(endpoints)
-    runner.configure_recovery(restart_wait_s=args.restart_wait)
+    runner.configure_recovery(
+        restart_wait_s=args.restart_wait,
+        max_recovery_retries=args.max_recovery_retries,
+    )
 
     def eval_scenario(ind: Scenario) -> Tuple[float, int, int, int]:
         """Evaluate scenario fitness - matching original Apollo GA.
@@ -535,101 +625,142 @@ def main() -> None:
         """
         g_name = f"Generation_{ind.gid:05d}"
         s_name = f"Scenario_{ind.cid:05d}"
-        start_ts = time.time()
-        print(f"[GA] Running {g_name} {s_name} uid={ind.uid}", flush=True)
-        record = {
-            "generation": ind.gid,
-            "scenario_id": ind.cid,
-            "scenario_uid": ind.uid,
-            "urls": urls,
-            "start_time": start_ts,
-            "scenario": _scenario_to_dict(ind),
-            "conflict_only": bool(args.conflict_only),
-        }
         log_path = log_dir / f"{g_name}_{s_name}.json"
-        try:
-            runner.set_scenario(ind)
-            runner.init_scenario()
-            runner.run_scenario(g_name, s_name, save_record=True)
-            violations = []
-            decisions = []
-            min_distance = None
-            unique_violation = 0
-            unique_decisions = 0
-            for endpoint, adc in zip(endpoints, ind.ad_section.adcs):
-                try:
-                    vresp = endpoint.fetch_violations(adc.route)
-                    violations.append(vresp)
-                    unique_violation += int(vresp.get("violation_count", 0))
-                    if vresp.get("min_distance") is not None:
-                        if min_distance is None:
-                            min_distance = vresp.get("min_distance")
+        discard_regen_count = 0
+        max_discard_regen = 50
+
+        while True:
+            start_ts = time.time()
+            print(f"[GA] Running {g_name} {s_name} uid={ind.uid}", flush=True)
+            record = {
+                "generation": ind.gid,
+                "scenario_id": ind.cid,
+                "scenario_uid": ind.uid,
+                "urls": urls,
+                "start_time": start_ts,
+                "scenario": _scenario_to_dict(ind),
+                "conflict_only": bool(args.conflict_only),
+            }
+            try:
+                runner.set_scenario(ind)
+                runner.init_scenario()
+                runner.run_scenario(g_name, s_name, save_record=True)
+                violations = []
+                decisions = []
+                min_distance = None
+                unique_violation = 0
+                unique_decisions = 0
+                for endpoint, adc in zip(endpoints, ind.ad_section.adcs):
+                    try:
+                        vresp = endpoint.fetch_violations(adc.route)
+                        violations.append(vresp)
+                        unique_violation += int(vresp.get("violation_count", 0))
+                        if vresp.get("min_distance") is not None:
+                            if min_distance is None:
+                                min_distance = vresp.get("min_distance")
+                            else:
+                                min_distance = min(
+                                    min_distance, vresp.get("min_distance")
+                                )
+                    except Exception as exc:
+                        violations.append({"status": "error", "error": str(exc)})
+                    try:
+                        dresp = endpoint.fetch_decisions()
+                        decisions.append(dresp)
+                        unique_decisions += _extract_unique_decisions(dresp)
+                    except Exception as exc:
+                        decisions.append({"status": "error", "error": str(exc)})
+
+                if min_distance is None:
+                    min_distance = float("inf")
+
+                # Count AD conflict pairs (matching original GA's has_ad_conflict)
+                conflict = _count_ad_conflicts(ind.ad_section, args.map)
+
+                record["violations"] = violations
+                record["decisions"] = decisions
+                record["min_distance"] = min_distance
+                record["unique_violation"] = unique_violation
+                record["unique_decisions"] = unique_decisions
+                record["conflict"] = conflict
+                record["status"] = "completed"
+                if discard_regen_count > 0:
+                    record["discarded_recovery_limit_attempts"] = discard_regen_count
+
+                fitness = _compute_fitness(
+                    float(min_distance), unique_decisions, conflict, unique_violation
+                )
+                record["fitness"] = {
+                    "min_distance": float(min_distance),
+                    "unique_decisions": unique_decisions,
+                    "conflict": conflict,
+                    "unique_violation": unique_violation,
+                    "score": list(fitness),
+                }
+                record["end_time"] = time.time()
+                record["elapsed_s"] = record["end_time"] - start_ts
+                with open(log_path, "w", encoding="utf-8") as fp:
+                    json.dump(record, fp, indent=2)
+                return fitness
+            except AutoModeUnavailableError as exc:
+                # Discard this attempt if recovery retry limit was exceeded.
+                if "Exceeded max recovery retries" in str(exc):
+                    discard_regen_count += 1
+                    print(
+                        (
+                            f"[GA] Discarding {g_name} {s_name} due to recovery limit "
+                            f"({discard_regen_count}/{max_discard_regen}); regenerating."
+                        ),
+                        flush=True,
+                    )
+                    if discard_regen_count <= max_discard_regen:
+                        vehicle_count = len(ind.ad_section.adcs)
+                        if args.conflict_only:
+                            regenerated = Scenario.get_conflict_one(
+                                vehicle_count, args.map, ind.gid, ind.cid
+                            )
                         else:
-                            min_distance = min(min_distance, vresp.get("min_distance"))
-                except Exception as exc:
-                    violations.append({"status": "error", "error": str(exc)})
-                try:
-                    dresp = endpoint.fetch_decisions()
-                    decisions.append(dresp)
-                    unique_decisions += _extract_unique_decisions(dresp)
-                except Exception as exc:
-                    decisions.append({"status": "error", "error": str(exc)})
+                            regenerated = Scenario.get_one(
+                                vehicle_count, args.map, ind.gid, ind.cid
+                            )
+                        ind.ad_section = regenerated.ad_section
+                        ind.pd_section = regenerated.pd_section
+                        ind.tc_section = regenerated.tc_section
+                        ind.uid = uuid.uuid4().hex
+                        if log_path.exists():
+                            log_path.unlink()
+                        continue
 
-            if min_distance is None:
-                min_distance = float("inf")
-
-            # Count AD conflict pairs (matching original GA's has_ad_conflict)
-            conflict = _count_ad_conflicts(ind.ad_section, args.map)
-
-            record["violations"] = violations
-            record["decisions"] = decisions
-            record["min_distance"] = min_distance
-            record["unique_violation"] = unique_violation
-            record["unique_decisions"] = unique_decisions
-            record["conflict"] = conflict
-            record["status"] = "completed"
-
-            fitness = _compute_fitness(
-                float(min_distance), unique_decisions, conflict, unique_violation
-            )
-            record["fitness"] = {
-                "min_distance": float(min_distance),
-                "unique_decisions": unique_decisions,
-                "conflict": conflict,
-                "unique_violation": unique_violation,
-                "score": list(fitness),
-            }
-        except AutoModeUnavailableError as exc:
-            record["status"] = "failed"
-            record["error"] = str(exc)
-            record["fitness"] = {
-                "min_distance": float("inf"),
-                "unique_decisions": 0,
-                "conflict": 0,
-                "unique_violation": 0,
-                "score": [float("inf"), 0, 0, 0],
-            }
-            record["end_time"] = time.time()
-            record["elapsed_s"] = record["end_time"] - start_ts
-            with open(log_path, "w", encoding="utf-8") as fp:
-                json.dump(record, fp, indent=2)
-            return (float("inf"), 0, 0, 0)
-        except Exception as exc:
-            record["status"] = "failed"
-            record["error"] = str(exc)
-            fitness = (float("inf"), 0, 0, 0)
-            record["fitness"] = {
-                "min_distance": float("inf"),
-                "unique_decisions": 0,
-                "conflict": 0,
-                "unique_violation": 0,
-                "score": [float("inf"), 0, 0, 0],
-            }
-        record["end_time"] = time.time()
-        record["elapsed_s"] = record["end_time"] - start_ts
-        with open(log_path, "w", encoding="utf-8") as fp:
-            json.dump(record, fp, indent=2)
-        return fitness
+                record["status"] = "failed"
+                record["error"] = str(exc)
+                record["fitness"] = {
+                    "min_distance": float("inf"),
+                    "unique_decisions": 0,
+                    "conflict": 0,
+                    "unique_violation": 0,
+                    "score": [float("inf"), 0, 0, 0],
+                }
+                record["end_time"] = time.time()
+                record["elapsed_s"] = record["end_time"] - start_ts
+                with open(log_path, "w", encoding="utf-8") as fp:
+                    json.dump(record, fp, indent=2)
+                return (float("inf"), 0, 0, 0)
+            except Exception as exc:
+                record["status"] = "failed"
+                record["error"] = str(exc)
+                fitness = (float("inf"), 0, 0, 0)
+                record["fitness"] = {
+                    "min_distance": float("inf"),
+                    "unique_decisions": 0,
+                    "conflict": 0,
+                    "unique_violation": 0,
+                    "score": [float("inf"), 0, 0, 0],
+                }
+                record["end_time"] = time.time()
+                record["elapsed_s"] = record["end_time"] - start_ts
+                with open(log_path, "w", encoding="utf-8") as fp:
+                    json.dump(record, fp, indent=2)
+                return fitness
 
     POP_SIZE = args.population
     OFF_SIZE = args.population
@@ -638,19 +769,22 @@ def main() -> None:
 
     toolbox = base.Toolbox()
     toolbox.register("evaluate", eval_scenario)
-    toolbox.register("mate", cx_scenario, map_path=args.map)
-    toolbox.register("mutate", mut_scenario, map_path=args.map)
+    toolbox.register("mate", cx_scenario, map_path=args.map, max_adc_count=max_vehicles)
+    toolbox.register(
+        "mutate", mut_scenario, map_path=args.map, max_adc_count=max_vehicles
+    )
     toolbox.register("select", tools.selNSGA2)
     toolbox.register("clone", deepcopy)
 
     population: List[Scenario] = []
     for cid in range(POP_SIZE):
-        # Always generate scenarios with exactly NUM_VEHICLES AD agents,
-        # so every scenario has 3 vehicles.
+        scenario_vehicle_count = randint(min_vehicles, max_vehicles)
         if args.conflict_only:
-            population.append(Scenario.get_conflict_one(NUM_VEHICLES, args.map, 0, cid))
+            population.append(
+                Scenario.get_conflict_one(scenario_vehicle_count, args.map, 0, cid)
+            )
         else:
-            population.append(Scenario.get_one(NUM_VEHICLES, args.map, 0, cid))
+            population.append(Scenario.get_one(scenario_vehicle_count, args.map, 0, cid))
 
     for index, ind in enumerate(population):
         ind.gid = 0

@@ -77,7 +77,7 @@ class PedestrianManager:
         distance = pd.speed * time_spent_walking
         boundary = self._crosswalk_boundary(pd.cw_id)
         if not boundary:
-            return ({"x": 0.0, "y": 0.0, "z": 0.0}, 0.0)
+            return ({"x": 0.0, "y": 0.0, "z": 1.8}, 0.0)
 
         line_list = []
         heading_list = []
@@ -97,14 +97,14 @@ class PedestrianManager:
         boundary_length = lines.length
         if boundary_length <= 0:
             p = boundary[0]
-            return ({"x": p[0], "y": p[1], "z": 0.0}, 0.0)
+            return ({"x": p[0], "y": p[1], "z": 1.8}, 0.0)
 
         curr_point = lines.interpolate(distance % boundary_length)
         for i, segment in enumerate(line_list):
             line = LineString(segment)
             if line.distance(curr_point) < 1e-6:
                 return (
-                    {"x": curr_point.x, "y": curr_point.y, "z": 0.0},
+                    {"x": curr_point.x, "y": curr_point.y, "z": 1.8},
                     heading_list[i],
                 )
 
@@ -112,11 +112,11 @@ class PedestrianManager:
             if Point(x, y).distance(curr_point) < 1e-6:
                 heading_idx = min(i, len(heading_list) - 1)
                 return (
-                    {"x": curr_point.x, "y": curr_point.y, "z": 0.0},
+                    {"x": curr_point.x, "y": curr_point.y, "z": 1.8},
                     heading_list[heading_idx],
                 )
 
-        return ({"x": curr_point.x, "y": curr_point.y, "z": 0.0}, 0.0)
+        return ({"x": curr_point.x, "y": curr_point.y, "z": 1.8}, 0.0)
 
     def get_pedestrians(self, curr_time: float) -> List[Dict]:
         """
