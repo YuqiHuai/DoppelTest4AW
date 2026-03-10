@@ -121,9 +121,6 @@ sender_globals = {
     "last_send_ts": 0.0,
 }
 
-if "ROS_DOMAIN_ID" in os.environ:
-    os.environ["ROS_DOMAIN_ID"] = os.environ["ROS_DOMAIN_ID"]
-
 
 def _receiver_url_config_source() -> str:
     if os.environ.get("RECEIVER_URLS"):

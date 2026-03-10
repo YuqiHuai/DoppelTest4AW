@@ -20,10 +20,9 @@ DEFAULT_SENSOR_MODEL = "sample_sensor_kit"
 
 
 def _resolve_log_root() -> pathlib.Path:
-    instance = os.environ.get("RECEIVER_INSTANCE") or os.environ.get("ROS_DOMAIN_ID")
     default_root = REPO_ROOT / "log"
-    if instance:
-        default_root = REPO_ROOT / f"container_{instance}" / "log"
+    if ROS_DOMAIN_ID:
+        default_root = REPO_ROOT / f"container_{ROS_DOMAIN_ID}" / "log"
     root = pathlib.Path(os.environ.get("RECEIVER_LOG_ROOT", str(default_root)))
     if not root.is_absolute():
         root = (REPO_ROOT / root).resolve()
