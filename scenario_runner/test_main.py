@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import List, Dict, Any, Tuple
 
 from copy import deepcopy
@@ -9,6 +11,9 @@ import uuid
 
 import numpy as np
 from deap import algorithms, base, tools
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scenario_runner.framework.scenario.ScenarioRunner import (
     AutoModeUnavailableError,
@@ -118,9 +123,34 @@ def _count_decision_subtypes(value: Any) -> int:
         return sum(1 for v in value.values() if bool(v))
     if isinstance(value, list):
         return len(value)
-    if isinstance(value, (int, float)):
-        return 1 if value != 0 else 0
-    return 1 if value else 0
+
+
+def _discover_docker_receiver_urls(max_needed: int) -> List[str]:
+    prefix = os.environ.get("AUTOWARE_RECEIVER_CONTAINER_PREFIX", "autoware_").strip()
+    if not prefix:
+        prefix = "autoware_"
+    port = os.environ.get("AUTOWARE_RECEIVER_PORT", "5002").strip() or "5002"
+
+    urls: List[str] = []
+    for i in range(1, max_needed + 1):
+        container_name = f"{prefix}{i}"
+        try:
+            ip = subprocess.check_output(
+                [
+                    "docker",
+                    "inspect",
+                    "-f",
+                    "{{if .State.Running}}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}{{end}}",
+                    container_name,
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            ip = ""
+        if ip:
+            urls.append(f"http://{ip}:{port}")
+    return urls
 
 
 def _extract_unique_decisions(decision_payload: Dict[str, Any]) -> int:
@@ -512,22 +542,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Default cluster URLs (override with AUTOWARE_RECEIVER_URLS or --url).
-    default_urls_env = os.environ.get("AUTOWARE_RECEIVER_URLS", "").strip()
-    if default_urls_env:
-        default_urls = [
-            u.strip().rstrip("/")
-            for u in default_urls_env.split(",")
-            if u.strip()
-        ]
-    else:
-        default_urls = [
-            "http://172.17.0.2:5002",
-            "http://172.17.0.3:5002",
-            "http://172.17.0.4:5002",
-            "http://172.17.0.5:5002",
-            "http://172.17.0.6:5002",
-        ]
     if args.num_vehicles is not None:
         if int(args.num_vehicles) < 2:
             raise ValueError("--num-vehicles must be >= 2.")
@@ -536,6 +550,32 @@ def main() -> None:
     else:
         min_vehicles = max(2, int(args.min_vehicles))
         max_vehicles = max(min_vehicles, int(args.max_vehicles))
+
+    # Receiver URL source priority:
+    # 1. explicit --url
+    # 2. AUTOWARE_RECEIVER_URLS
+    # 3. Docker auto-discovery of autoware_<n> containers
+    # 4. built-in Docker bridge examples
+    default_urls_env = os.environ.get("AUTOWARE_RECEIVER_URLS", "").strip()
+    docker_discovered_urls: List[str] = []
+    if default_urls_env:
+        default_urls = [
+            u.strip().rstrip("/")
+            for u in default_urls_env.split(",")
+            if u.strip()
+        ]
+    else:
+        docker_discovered_urls = _discover_docker_receiver_urls(max_vehicles)
+        if docker_discovered_urls:
+            default_urls = docker_discovered_urls
+        else:
+            default_urls = [
+                "http://172.17.0.2:5002",
+                "http://172.17.0.3:5002",
+                "http://172.17.0.4:5002",
+                "http://172.17.0.5:5002",
+                "http://172.17.0.6:5002",
+            ]
 
     url_pool: List[str] = [str(u).rstrip("/") for u in (args.urls or [])]
     if len(url_pool) < max_vehicles:
@@ -558,12 +598,19 @@ def main() -> None:
         flush=True,
     )
     if not args.urls and not default_urls_env:
-        print(
-            "[GA][WARN] Using built-in Docker bridge example URLs "
-            "(172.17.0.2..172.17.0.6). If your container IPs differ, pass "
-            "--url multiple times or set AUTOWARE_RECEIVER_URLS.",
-            flush=True,
-        )
+        if docker_discovered_urls:
+            print(
+                f"[GA] Auto-discovered receiver endpoints from Docker: {docker_discovered_urls}",
+                flush=True,
+            )
+        else:
+            print(
+                "[GA][WARN] Using built-in Docker bridge example URLs "
+                "(172.17.0.2..172.17.0.6). If your container IPs differ, pass "
+                "--url multiple times, set AUTOWARE_RECEIVER_URLS, or run from "
+                "a shell that can access Docker for auto-discovery.",
+                flush=True,
+            )
     print(f"[GA] Receiver endpoints: {urls}", flush=True)
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)

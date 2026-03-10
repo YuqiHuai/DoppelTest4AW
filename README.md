@@ -7,86 +7,123 @@ Paper: `https://dl.acm.org/doi/10.1109/ICSE48619.2023.00216`
 ## Repo Layout
 - `autoware_controller/`: receiver API, sender, rosbag control, violation analysis
 - `autoware_launch/`: Docker image and container launch helpers
-- `autoware_map/`: Lanelet2 map assets used by Autoware experiments
+- `autoware_map/`: Lanelet2 map directories used by Autoware experiments
 - `scenario_runner/`: scenario generation and experiment orchestration
-- `start.sh`: opens a 5-pane `tmux` session and enters 5 Autoware containers
+- `start.sh`: starts containers and receivers for the default multi-vehicle workflow
 
 ## Requirements
 - Linux
 - Docker
-- `tmux`
 - `rocker`
 - NVIDIA GPU, drivers, and X11 support for the provided launch scripts
 
-Optional setup tools:
-- `ansible-galaxy`
-- `ansible-playbook`
-- `gdown`
-- `unzip`
-
-## Quick Start
-### 1. Build the container image
+## Default Workflow
+### 1. Build the multi-container image
 ```bash
 bash autoware_launch/build/build_docker.sh --multi_container
 ```
 
-### 2. Start the default 5-container session
+### 2. Start containers and receivers
 ```bash
 bash start.sh
 ```
 
-`start.sh` recreates a `tmux` session named `autoware`, opens 5 panes, and enters containers `autoware_1` to `autoware_5`.
+This starts or reuses `autoware_1` to `autoware_5`, assigns `ROS_DOMAIN_ID=1..5`, launches `autoware_controller/receiver.py` in the background, waits for `/health`, and prints the receiver URLs.
 
-### 3. In each container, set a unique ROS domain and start the receiver
-Container 1:
+### 3. Run one GA iteration with 5 vehicles
 ```bash
-export ROS_DOMAIN_ID=1
-cd ~/DoppelAutoware
-python3 autoware_controller/receiver.py
+python3 scenario_runner/test_main.py --num-vehicles 5 --generations 1
 ```
 
-Container 2:
+Meaning:
+- `--num-vehicles 5`: each generated scenario uses 5 active Autoware vehicles
+- `--generations 1`: run one GA generation
+
+By default, `test_main.py` auto-discovers running containers named `autoware_1`, `autoware_2`, ... through Docker and uses their current container IPs.
+
+Default map:
+- `autoware_map/sample-map-planning/lanelet2_map.osm`
+
+To run on `BorregasAve`, add `--map`:
 ```bash
-export ROS_DOMAIN_ID=2
-cd ~/DoppelAutoware
-python3 autoware_controller/receiver.py
+python3 scenario_runner/test_main.py \
+  --num-vehicles 5 \
+  --generations 1 \
+  --map autoware_map/BorregasAve/lanelet2_map.osm
 ```
 
-Repeat for the remaining containers.
+## `test_main.py`
+Main entrypoint:
+
+```bash
+python3 scenario_runner/test_main.py
+```
+
+It orchestrates:
+- Autoware startup and recovery
+- sender restart with peer receiver URLs
+- localization and route initialization
+- autonomous mode switching
+- pedestrian and traffic signal publishing
+- rosbag control
+- violation, decision, and fitness collection
+
+Common examples:
+
+Fixed vehicle count:
+```bash
+python3 scenario_runner/test_main.py \
+  --num-vehicles 3 \
+  --generations 10
+```
+
+Mixed-size scenarios:
+```bash
+python3 scenario_runner/test_main.py \
+  --min-vehicles 2 \
+  --max-vehicles 5 \
+  --duration-hours 1
+```
+
+Explicit receiver URLs:
+```bash
+python3 scenario_runner/test_main.py \
+  --url http://<vehicle1-ip>:5002 \
+  --url http://<vehicle2-ip>:5002 \
+  --url http://<vehicle3-ip>:5002 \
+  --num-vehicles 3
+```
+
+Useful flags:
+- `--log-dir`: output directory for scenario JSON files and GA logs
+- `--restart-wait`: wait time after Autoware restart, default `60`
+- `--max-recovery-retries`: per-scenario recovery attempts before marking failure
+- `--conflict-only`: generate only conflict scenarios
+- `--no-conflict-only`: disable conflict-only generation
 
 ## Receiver API
 The receiver listens on `0.0.0.0:5002` inside each container.
 
-Use `127.0.0.1:5002` only from the same container. From another container or the host, use the receiver container's reachable IP.
-
-Example health check:
+Health check:
 ```bash
 curl http://127.0.0.1:5002/health
 ```
 
-If you want shorter `curl` commands, you can define a shell helper:
-```bash
-export RECEIVER_API_BASE="http://127.0.0.1:5002"
-curl "$RECEIVER_API_BASE/health"
-```
-
-`RECEIVER_API_BASE` is only a shell variable for examples in this README. It is not used by the project code.
-
-### Start Autoware through the API
+Start Autoware:
 ```bash
 curl -X POST http://127.0.0.1:5002/autoware/start \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
 
-### Start the sender
+Start sender:
 ```bash
 curl -X POST http://127.0.0.1:5002/sender/start \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
 
-### Start the sender with explicit peer URLs
+Start sender with explicit peer URLs:
 ```bash
 curl -X POST http://127.0.0.1:5002/sender/start \
   -H 'Content-Type: application/json' \
@@ -98,99 +135,18 @@ curl -X POST http://127.0.0.1:5002/sender/start \
   }'
 ```
 
-## Running Experiments
-Main entrypoint:
-
-```bash
-python3 scenario_runner/test_main.py
-```
-
-What it does:
-- starts Autoware on active vehicles
-- restarts sender processes with peer receiver URLs
-- initializes localization and routes
-- switches vehicles to autonomous mode at scheduled times
-- publishes pedestrians and traffic signals
-- starts and stops rosbag logging
-- collects violations, decisions, and fitness
-
-### Before running `test_main.py`
-1. Start the containers.
-2. In each container, set a unique `ROS_DOMAIN_ID`.
-3. Start `python3 autoware_controller/receiver.py` in each participating container.
-
-`test_main.py` expects each receiver API to already be running.
-
-### Minimal example
-```bash
-python3 scenario_runner/test_main.py \
-  --url http://<vehicle1-ip>:5002 \
-  --url http://<vehicle2-ip>:5002 \
-  --url http://<vehicle3-ip>:5002 \
-  --url http://<vehicle4-ip>:5002 \
-  --url http://<vehicle5-ip>:5002 \
-  --num-vehicles 5 \
-  --generations 1 \
-  --log-dir scenario_runs
-```
-
-### Alternative: receiver URLs from environment
-```bash
-export AUTOWARE_RECEIVER_URLS="http://<v1>:5002,http://<v2>:5002,http://<v3>:5002,http://<v4>:5002,http://<v5>:5002"
-python3 scenario_runner/test_main.py --num-vehicles 5 --generations 1
-```
-
-### Common run modes
-Fixed vehicle count:
-```bash
-python3 scenario_runner/test_main.py \
-  --url http://<v1>:5002 \
-  --url http://<v2>:5002 \
-  --url http://<v3>:5002 \
-  --num-vehicles 3 \
-  --generations 10
-```
-
-Mixed-size scenarios:
-```bash
-python3 scenario_runner/test_main.py \
-  --url http://<v1>:5002 \
-  --url http://<v2>:5002 \
-  --url http://<v3>:5002 \
-  --url http://<v4>:5002 \
-  --url http://<v5>:5002 \
-  --min-vehicles 2 \
-  --max-vehicles 5 \
-  --duration-hours 1
-```
-
-Allow non-conflict scenarios:
-```bash
-python3 scenario_runner/test_main.py ... --no-conflict-only
-```
-
-### Important options
-- `--url`: receiver base URL; repeat once per vehicle
-- `--num-vehicles`: fixed vehicle count
-- `--min-vehicles`, `--max-vehicles`: mixed-size runs
-- `--map`: Lanelet2 map path
-- `--population`: GA population size
-- `--generations`: number of generations
-- `--duration-hours`: time-limited run when `--generations 0`
-- `--log-dir`: output directory for experiment results
-- `--restart-wait`: wait after Autoware restart
-- `--max-recovery-retries`: retry limit before failure
-
 ## Runtime Parameters
-Parameters that matter in the current code:
-- `ROS_DOMAIN_ID`: required; isolates each Autoware instance
-- `RECEIVER_LOG_ROOT`: optional; overrides the receiver log directory
-- `AUTOWARE_RECEIVER_URLS`: optional; comma-separated receiver base URLs for `test_main.py`
-- `AUTOWARE_RECEIVER_URL`: optional; default receiver URL for helper code in `scenario_runner/framework/scenario/ad_agents.py`
-- `RECEIVER_URLS`, `RECEIVER_URL`, `RECEIVER_CLUSTER_HOSTS`, `RECEIVER_PORT`, `RECEIVER_PATH`, `SELF_IP`: optional sender-side transport settings
+Main parameters still relevant in the current code:
+- `ROS_DOMAIN_ID`: per-container ROS 2 isolation; assigned automatically by `start.sh`, `dev_start.sh`, and `dev_into.sh`
+- `CONTAINER_COUNT`: number of containers started by `start.sh`, default `5`
+- `AUTO_START_RECEIVER`: set `0` to make `start.sh` skip receiver startup
+- `AUTOWARE_RECEIVER_URLS`: explicit receiver base URLs for `test_main.py`
+- `AUTOWARE_RECEIVER_CONTAINER_PREFIX`: Docker auto-discovery prefix for `test_main.py`, default `autoware_`
+- `AUTOWARE_RECEIVER_PORT`: receiver port for Docker auto-discovery, default `5002`
+- `RECEIVER_LOG_ROOT`: override receiver log directory
 
-Parameters removed from the current implementation:
-- `RECEIVER_INSTANCE`: no longer used
+Removed:
+- `RECEIVER_INSTANCE`
 
 ## Outputs
 `test_main.py` writes to the selected `--log-dir`:
@@ -198,32 +154,37 @@ Parameters removed from the current implementation:
 - `Generation_XXXXX_Scenario_XXXXX.json`
 - `GA_selection_gen_XXXXX.json`
 
-Receiver-side logs default to:
+Receiver logs default to:
 ```text
 container_<ROS_DOMAIN_ID>/log/
 ```
 
-`RECEIVER_LOG_ROOT` overrides that path if needed.
-
-## Manual Container Workflow
-If you do not want to use `start.sh`:
-
+## Manual Control
+Start one container:
 ```bash
 bash autoware_launch/scripts/dev_start.sh --use_multi_container --container_name autoware_1
+```
+
+Enter a container shell:
+```bash
 bash autoware_launch/scripts/dev_into.sh --container_name autoware_1
-export ROS_DOMAIN_ID=1
+```
+
+Enter and start the receiver:
+```bash
+bash autoware_launch/scripts/dev_into.sh --container_name autoware_1 --start-receiver
+```
+
+For custom container names without numeric suffixes:
+```bash
+bash autoware_launch/scripts/dev_start.sh --use_multi_container --container_name my_av --ros-domain-id 7
+bash autoware_launch/scripts/dev_into.sh --container_name my_av --ros-domain-id 7 --start-receiver
 ```
 
 ## Common Mistakes
-- Reusing the same `ROS_DOMAIN_ID` across containers
 - Passing `/perception` URLs to `test_main.py` instead of receiver base URLs
-- Using Docker example IPs without checking the actual container network
-- Providing fewer receiver URLs than the configured vehicle count
-
-## Notes
-- The default workflow assumes 5 vehicles.
-- Sender defaults include Docker bridge example IPs `172.17.0.2` to `172.17.0.6`.
-- The provided launch scripts assume the local Docker/X11/GPU setup used by this project.
+- Running `test_main.py` from an environment that cannot access Docker when relying on auto-discovery
+- Using a `--map` path that exists on the host but not inside the Autoware containers
 
 ## Citation
 If you use this repository in research, cite the DoppelTest paper and document any local changes to Autoware, maps, or analysis logic.
