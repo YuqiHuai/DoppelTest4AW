@@ -7,6 +7,7 @@ Paper: `https://dl.acm.org/doi/10.1109/ICSE48619.2023.00216`
 ## Repo Layout
 - `autoware_controller/`: receiver API, sender, rosbag control, violation analysis
 - `autoware_launch/`: Docker image and container launch helpers
+- `autoware_map/`: Lanelet2 map assets used by Autoware experiments
 - `scenario_runner/`: scenario generation and experiment orchestration
 - `start.sh`: opens a 5-pane `tmux` session and enters 5 Autoware containers
 
