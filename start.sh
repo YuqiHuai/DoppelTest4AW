@@ -50,18 +50,28 @@ done
 for i in {1..5}; do
   cname="${PREFIX}${i}"
 
-  for _ in {1..60}; do
-    is_running "$cname" && break
-    sleep 1
-  done
-
-  if ! is_running "$cname"; then
-    echo "[ERROR] $cname not running after wait"
+  if is_running "$cname"; then
+    echo "[skip] $cname already running"
     continue
   fi
 
-  pane="${PANES[$((i-1))]}"
-  tmux send-keys -t "$pane" "bash \"$INTO_SCRIPT\" --container_name \"$cname\"" C-m
+  echo "[start] $cname"
+
+  export ROS_DOMAIN_ID=$i
+  export RECEIVER_INSTANCE=$i
+
+  if ! bash "$START_SCRIPT" --use_multi_container --container_name "$cname"; then
+    if is_running "$cname"; then
+      echo "[warn] $cname is running, continue"
+    else
+      echo "[ERROR] failed to start $cname"
+      exit 1
+    fi
+  fi
+
+  echo "[exec] starting receiver in $cname"
+  docker exec -u $(id -u):$(id -g) -d "$cname" \
+    bash -c "cd \$HOME/DoppelAutoware && python3 autoware_controller/receiver.py"
 done
 
 tmux attach -t "$SESSION"

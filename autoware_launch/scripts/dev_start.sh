@@ -75,6 +75,8 @@ if [[ "$(docker ps -q -f name=$CONTAINER_NAME)" != "" ]]; then
 fi
 
 rocker --nvidia --privileged --x11 --user \
+    --env ROS_DOMAIN_ID \
+    --env RECEIVER_INSTANCE \
     --volume "$WORKSPACE_PATH":"$HOME/DoppelAutoware" \
     --volume "$DATA_PATH":"$HOME/autoware_data" \
     --name $CONTAINER_NAME \
