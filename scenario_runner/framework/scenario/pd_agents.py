@@ -5,7 +5,7 @@ from typing import List
 
 from scenario_runner.hdmap.MapParser import MapParser
 
-DEFAULT_MAP = "autoware_map/sample-map-planning/lanelet2_map.osm"
+DEFAULT_MAP = "autoware_map/BorregasAve/lanelet2_map.osm"
 MAX_PD_COUNT = 5
 SCENARIO_UPPER_LIMIT = 30
 

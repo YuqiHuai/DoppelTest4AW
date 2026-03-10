@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 
 from scenario_runner.hdmap.MapParser import MapParser
 
-DEFAULT_MAP = "autoware_map/sample-map-planning/lanelet2_map.osm"
+DEFAULT_MAP = "autoware_map/BorregasAve/lanelet2_map.osm"
 SCENARIO_UPPER_LIMIT = 30
 
 

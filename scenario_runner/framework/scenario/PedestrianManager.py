@@ -6,7 +6,7 @@ from shapely.geometry import LineString, MultiLineString, Point
 from scenario_runner.framework.scenario.pd_agents import PDAgent, PDSection
 from scenario_runner.hdmap.MapParser import MapParser
 
-DEFAULT_MAP = "autoware_map/sample-map-planning/lanelet2_map.osm"
+DEFAULT_MAP = "autoware_map/BorregasAve/lanelet2_map.osm"
 
 
 class PedestrianManager:

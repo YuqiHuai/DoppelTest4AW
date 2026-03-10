@@ -10,9 +10,9 @@ ROS_TRAFFIC_SIGNAL_TOPIC = "/perception/traffic_light_recognition/traffic_signal
 ROS_DOMAIN_ID = os.environ.get("ROS_DOMAIN_ID", "1")
 os.environ["ROS_DOMAIN_ID"] = ROS_DOMAIN_ID
 
-VIOLATION_MAP_NAME = "sample-map-planning"
+VIOLATION_MAP_NAME = "BorregasAve"
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_MAP_PATH = REPO_ROOT / "autoware_map" / "sample-map-planning"
+DEFAULT_MAP_PATH = REPO_ROOT / "autoware_map" / "BorregasAve"
 AUTOWARE_LAUNCH_PACKAGE = "autoware_launch"
 AUTOWARE_LAUNCH_FILE = "planning_simulator.launch.xml"
 DEFAULT_VEHICLE_MODEL = "sample_vehicle"

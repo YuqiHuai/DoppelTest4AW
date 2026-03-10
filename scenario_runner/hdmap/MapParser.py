@@ -1074,7 +1074,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Print useful Lanelet2 map stats.")
     parser.add_argument(
         "--map",
-        default="autoware_map/sample-map-planning/lanelet2_map.osm",
+        default="autoware_map/BorregasAve/lanelet2_map.osm",
         help="Map name or path (OSM path for Lanelet2).",
     )
     parser.add_argument(

@@ -17,6 +17,34 @@ Paper: `https://dl.acm.org/doi/10.1109/ICSE48619.2023.00216`
 - `rocker`
 - NVIDIA GPU, drivers, and X11 support for the provided launch scripts
 
+## Python and `rocker` Setup
+Install `uv` first. Official docs: `https://docs.astral.sh/uv/getting-started/installation/`
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+From the repo root, sync the project environment:
+
+```bash
+uv sync
+```
+
+This repo already vendors `rocker` under `autoware_launch/rocker/`. `uv sync` installs it from the local path, so do not clone it separately.
+
+If you want to run on maps other than the default `BorregasAve`, install ROS 2 first using the official Humble installation guide:
+
+- `https://docs.ros.org/en/humble/Installation.html`
+
+Then source ROS 2 and install Lanelet2:
+
+```bash
+source /opt/ros/humble/setup.bash
+sudo apt install ros-humble-lanelet2
+```
+
+`lanelet2` is not managed by `uv` here. It comes from the ROS environment and is used for reliable Lanelet2 routing/regulatory parsing and by the violation analyzer.
+
 ## Default Workflow
 ### 1. Build the multi-container image
 ```bash
@@ -32,31 +60,37 @@ This starts or reuses `autoware_1` to `autoware_5`, assigns `ROS_DOMAIN_ID=1..5`
 
 ### 3. Run one GA iteration with 5 vehicles
 ```bash
-python3 scenario_runner/test_main.py --num-vehicles 5 --generations 1
+uv run --script scenario_runner/test_main.py --num-vehicles 5 --generations 1
 ```
 
 Meaning:
 - `--num-vehicles 5`: each generated scenario uses 5 active Autoware vehicles
 - `--generations 1`: run one GA generation
 
+After experiments, remove the Autoware containers:
+
+```bash
+bash autoware_launch/scripts/kill_all.sh
+```
+
 By default, `test_main.py` auto-discovers running containers named `autoware_1`, `autoware_2`, ... through Docker and uses their current container IPs.
 
 Default map:
-- `autoware_map/sample-map-planning/lanelet2_map.osm`
+- `autoware_map/BorregasAve/lanelet2_map.osm`
 
-To run on `BorregasAve`, add `--map`:
+To run on `sample-map-planning`, add `--map`:
 ```bash
-python3 scenario_runner/test_main.py \
+uv run --script scenario_runner/test_main.py \
   --num-vehicles 5 \
   --generations 1 \
-  --map autoware_map/BorregasAve/lanelet2_map.osm
+  --map autoware_map/sample-map-planning/lanelet2_map.osm
 ```
 
 ## `test_main.py`
 Main entrypoint:
 
 ```bash
-python3 scenario_runner/test_main.py
+uv run --script scenario_runner/test_main.py
 ```
 
 It orchestrates:
@@ -72,14 +106,14 @@ Common examples:
 
 Fixed vehicle count:
 ```bash
-python3 scenario_runner/test_main.py \
+uv run --script scenario_runner/test_main.py \
   --num-vehicles 3 \
   --generations 10
 ```
 
 Mixed-size scenarios:
 ```bash
-python3 scenario_runner/test_main.py \
+uv run --script scenario_runner/test_main.py \
   --min-vehicles 2 \
   --max-vehicles 5 \
   --duration-hours 1
@@ -87,7 +121,7 @@ python3 scenario_runner/test_main.py \
 
 Explicit receiver URLs:
 ```bash
-python3 scenario_runner/test_main.py \
+uv run --script scenario_runner/test_main.py \
   --url http://<vehicle1-ip>:5002 \
   --url http://<vehicle2-ip>:5002 \
   --url http://<vehicle3-ip>:5002 \

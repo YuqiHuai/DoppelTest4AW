@@ -481,7 +481,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--map",
-        default="autoware_map/sample-map-planning/lanelet2_map.osm",
+        default="autoware_map/BorregasAve/lanelet2_map.osm",
         help="Lanelet2 OSM map path.",
     )
     parser.add_argument(

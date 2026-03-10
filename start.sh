@@ -157,4 +157,4 @@ for i in $(seq 1 "$CONTAINER_COUNT"); do
 done
 echo
 echo "Next:"
-echo "  python3 scenario_runner/test_main.py --num-vehicles $CONTAINER_COUNT --generations 1"
+echo "  uv run --script scenario_runner/test_main.py --num-vehicles $CONTAINER_COUNT --generations 1"
