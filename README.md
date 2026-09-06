@@ -14,8 +14,47 @@ Paper: `https://dl.acm.org/doi/10.1109/ICSE48619.2023.00216`
 ## Requirements
 - Linux
 - Docker
-- `rocker`
-- NVIDIA GPU, drivers, and X11 support for the provided launch scripts
+- `rocker`, an NVIDIA GPU and X11 -- **only** for `start.sh` / `dev_start.sh`.
+  The headless path below needs none of them; see *Headless, on a pinned
+  Autoware release*.
+
+## Headless, on a pinned Autoware release
+
+The image is pinned **by digest** to Autoware 0.52.0
+(`autoware@sha256:3ead2d77...`, the amd64 child of
+`universe-devel-humble-1.9.0`) rather than to the floating
+`universe-devel-cuda-amd64` tag it used to name, so a run is tied to a known
+release instead of to whatever upstream published that day.
+
+Containers can then be started with plain `docker run` -- no `rocker`, no X
+server, no host Python -- as long as three things hold, all of which are
+already set up in this repo:
+
+- **Do not set `ROS_LOCALHOST_ONLY`.** The 0.52.0 image ships a
+  `CYCLONEDDS_URI` whose config already names the `lo` interface;
+  `ROS_LOCALHOST_ONLY` injects a second one and Cyclone then selects neither
+  (*"lo: the same interface may not be selected twice"*), so every rclpy node
+  fails with `rcl node's rmw handle is invalid` and the receiver never answers
+  `/health`. Vehicles are still isolated: one container is one network
+  namespace, and discovery never leaves its `lo`.
+- **Point `CYCLONEDDS_URI` at `autoware_launch/cyclonedds.xml`** and give the
+  container `--cap-add=NET_ADMIN`. That file explains both: discovery on `lo`
+  has no multicast, so participant indices are scanned 0..9 by default and most
+  of Autoware's ~45 participants abort.
+- **`rviz:=false`**, which `_build_autoware_launch_cmd` now passes by default
+  via `AUTOWARE_LAUNCH_EXTRA_ARGS`.
+
+A scripted end-to-end run of exactly this shape -- build, N vehicles, the GA in
+a container, results collected -- lives in the MozartTest-Autoware repo at
+`harness/doppel/run_doppeltest_experiment.sh`, which also mounts an
+instrumented `autoware_universe` overlay read-only and sources it before
+`ros2 launch`.
+
+Maps need three files, not one: `lanelet2_map.osm`, `map_projector_info.yaml`
+and `pointcloud_map.pcd` -- 0.52.0's map loader opens the point cloud even in
+the planning simulator, which never uses it. `BorregasAve` now ships a
+projector info (MGRS grid `10SEG`, read from its own `mgrs_code` tags) and a
+one-point stub cloud for that reason.
 
 ## Python and `rocker` Setup
 Install `uv` first. Official docs: `https://docs.astral.sh/uv/getting-started/installation/`

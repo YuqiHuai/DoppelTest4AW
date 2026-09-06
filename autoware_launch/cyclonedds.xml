@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+CycloneDDS config for a DoppelTest vehicle container. Derived from the 0.52.0
+image's /home/aw/cyclonedds.xml, with two changes.
+
+1. MaxAutoParticipantIndex. Discovery is pinned to `lo`, which is not
+   multicast-capable, so Cyclone disables multicast -- and with multicast off
+   `ParticipantIndex: none` cannot use ephemeral ports and degrades to `auto`,
+   scanning indices 0..MaxAutoParticipantIndex. That default is 9, so the 10th
+   participant dies with "Failed to find a free participant index". Autoware
+   0.52.0 launches ~45 processes, each a participant, so most of the stack
+   aborts and the launch is left with no planner. The symptom is
+   `rmw_create_node: failed to create domain`, which reads like a DDS
+   misconfiguration rather than a quota.
+
+2. SocketReceiveBufferSize. The image demands min="10MB"; Cyclone treats an
+   unmet minimum as fatal, and net.core.rmem_max is a host-wide setting a
+   container cannot raise. Dropping the element falls back to "default", which
+   warns and continues.
+
+ROS_LOCALHOST_ONLY must be UNSET when this file is used: it injects a second
+NetworkInterface (address 127.0.0.1) and Cyclone then refuses with "lo: the
+same interface may not be selected twice", selecting no interface at all.
+Isolation between vehicles does not depend on it -- each vehicle is its own
+container, hence its own network namespace, and DDS never leaves that lo.
+-->
+<CycloneDDS xmlns="https://cdds.io/config" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>250</MaxAutoParticipantIndex>
+    </Discovery>
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo" priority="default" multicast="default"/>
+      </Interfaces>
+      <AllowMulticast>default</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+    </General>
+    <Internal>
+      <Watermarks>
+        <WhcHigh>500kB</WhcHigh>
+      </Watermarks>
+    </Internal>
+  </Domain>
+</CycloneDDS>

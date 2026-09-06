@@ -1,3 +1,4 @@
+import os
 import pathlib
 import signal
 import subprocess
@@ -53,6 +54,10 @@ def _resolve_map_path(map_path: Optional[str]) -> pathlib.Path:
 def _build_autoware_launch_cmd(
     map_path: pathlib.Path, vehicle_model: str, sensor_model: str
 ) -> List[str]:
+    # Extra `name:=value` launch arguments, whitespace separated. A headless
+    # host needs rviz:=false -- rviz2 is launched by default and dies without
+    # a DISPLAY.
+    extra = os.environ.get("AUTOWARE_LAUNCH_EXTRA_ARGS", "rviz:=false").split()
     return [
         "ros2",
         "launch",
@@ -61,6 +66,7 @@ def _build_autoware_launch_cmd(
         f"map_path:={map_path}",
         f"vehicle_model:={vehicle_model}",
         f"sensor_model:={sensor_model}",
+        *extra,
     ]
 
 

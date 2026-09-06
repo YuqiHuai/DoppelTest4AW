@@ -39,3 +39,5 @@ scenario_runs*/
 *.gif
 metadata.yaml
 *.db3
+# Per-container receiver logs and rosbags
+container_*/
