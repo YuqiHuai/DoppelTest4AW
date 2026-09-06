@@ -48,7 +48,9 @@ A scripted end-to-end run of exactly this shape -- build, N vehicles, the GA in
 a container, results collected -- lives in the MozartTest-Autoware repo at
 `harness/doppel/run_doppeltest_experiment.sh`, which also mounts an
 instrumented `autoware_universe` overlay read-only and sources it before
-`ros2 launch`.
+`ros2 launch`. `/planning/module_activation`, that overlay's activation beacon,
+is in the recorded topic list; on a stock build the topic simply does not exist
+and nothing is recorded for it.
 
 Maps need three files, not one: `lanelet2_map.osm`, `map_projector_info.yaml`
 and `pointcloud_map.pcd` -- 0.52.0's map loader opens the point cloud even in

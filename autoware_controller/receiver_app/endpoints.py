@@ -688,6 +688,13 @@ async def start_logging(request: StartLoggingRequest):
         "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/intersection",
         "/planning/scenario_planning/lane_driving/motion_planning/motion_velocity_planner/obstacle_stop/virtual_walls",
         "/autoware/state",
+        # The instrumented overlay's per-cycle activation beacon
+        # (autoware_internal_debug_msgs/StringStamped). Absent on a stock
+        # build, where `ros2 bag record` simply records nothing for it, so
+        # this stays harmless when no overlay is sourced. Recording it is what
+        # lets MozartTest's harness/ssv2/beacon_intervals.py read activation
+        # intervals straight out of a DoppelTest bag.
+        "/planning/module_activation",
         "--output",
         str(output_dir),
     ]
