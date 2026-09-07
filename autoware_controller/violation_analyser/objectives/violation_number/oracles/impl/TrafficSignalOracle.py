@@ -1,17 +1,13 @@
-import math
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from autoware_perception_msgs.msg import TrafficLightElement, TrafficLightGroupArray
 from nav_msgs.msg import Odometry
 
-from config import AUTOWARE_VEHICLE_WHEEL_BASE
 from objectives.violation_number.oracles.OracleInterface import OracleInterface
 from objectives.violation_number.oracles.Violation import Violation
 from tools.autoware_tools.calculate_velocity import calculate_velocity
 from tools.hdmap.VectorMapParser import VectorMapParser
-from tools.utils import quaternion_2_heading
-
-Frame = Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float], float]
+from tools.utils import StopLineCrossings
 
 
 class TrafficSignalOracle(OracleInterface):
@@ -21,22 +17,9 @@ class TrafficSignalOracle(OracleInterface):
     A violation is recorded when the ego vehicle's FRONT AXLE crosses the stop
     line of a signal that is red at the moment of the crossing, while moving.
 
-    Two things about that definition are deliberate, because the obvious
-    alternatives both report a correctly stopping vehicle:
-
-    - The reference point is the front axle, not the vehicle footprint.
-      Autoware's traffic_light module runs with `stop_margin: 0.0`, so a
-      CORRECT stop puts the front bumper on the stop line and holds it there.
-      Any test anchored at the bumper -- such as intersecting the footprint
-      with the line -- therefore fires on every properly executed stop at a
-      red light. Measured on BorregasAve: the ego stopped with its pose 3.4-3.6
-      m short of the line, bumper 0.2-0.3 m past it, front axle still 0.7-0.8 m
-      short. The front axle is a wheel_base behind the bumper and stays clear.
-
-    - The event is a CROSSING (from before the line to beyond it), not the
-      state of being beyond it. A vehicle that entered on green and is still
-      in the intersection when the signal turns red has not run the light, but
-      it is `beyond` the line for as long as the red lasts.
+    Both halves of that -- the front axle, and a crossing rather than a state --
+    are what StopLineCrossings exists to provide; see it for why a footprint
+    test reports every correct stop as a violation.
 
     Event-level counting:
       - multiple signal IDs can share one physical stop line on map,
@@ -46,18 +29,12 @@ class TrafficSignalOracle(OracleInterface):
     # A crossing at a standstill is not a crossing; this only guards against
     # localization jitter, since passing the line implies motion anyway.
     STOPPED_SPEED_MPS = 0.01
-    # How far past either end of the stop line the crossing point may lie and
-    # still count. A stop line spans its approach, so a vehicle passing outside
-    # this window is not on the road the line governs.
-    SPAN_TOLERANCE_M = 1.0
 
     last_localization: Optional[Odometry]
     last_traffic_signal_detection: Optional[TrafficLightGroupArray]
     red_signal_ids: Set[str]
     traffic_signal_stop_line_string_dict: Dict[str, object]
-    stop_line_frames: Dict[str, Frame]
-    stop_line_orientation: Dict[str, float]
-    last_axle_offset: Dict[str, Optional[float]]
+    crossings: Optional[StopLineCrossings]
     signal_id_to_event_key: Dict[str, str]
     event_key_to_signal_ids: Dict[str, Set[str]]
     violated_event_keys: Set[str]
@@ -68,9 +45,7 @@ class TrafficSignalOracle(OracleInterface):
         self.last_traffic_signal_detection = None
         self.red_signal_ids = set()
         self.traffic_signal_stop_line_string_dict = dict()
-        self.stop_line_frames = {}
-        self.stop_line_orientation = {}
-        self.last_axle_offset = {}
+        self.crossings = None
         self.signal_id_to_event_key = {}
         self.event_key_to_signal_ids = {}
         self.violated_event_keys = set()
@@ -151,92 +126,24 @@ class TrafficSignalOracle(OracleInterface):
         except Exception:
             return None
 
-    @staticmethod
-    def _stop_line_frame(geom) -> Optional[Frame]:
-        """Origin, tangent, normal and span of a stop line.
-
-        The normal has no inherent direction -- which side is `beyond` depends
-        on which way the vehicle drives -- so it is oriented per vehicle the
-        first time the line is approached, in _axle_offset.
-        """
-        coords: List[tuple] = []
-        geom_type = getattr(geom, "geom_type", "")
-        if geom_type == "LineString":
-            coords = list(geom.coords)
-        elif geom_type == "MultiLineString":
-            for line in getattr(geom, "geoms", []):
-                coords.extend(list(line.coords))
-        if len(coords) < 2:
-            return None
-        x0, y0 = float(coords[0][0]), float(coords[0][1])
-        x1, y1 = float(coords[-1][0]), float(coords[-1][1])
-        dx, dy = x1 - x0, y1 - y0
-        span = math.hypot(dx, dy)
-        if span < 1e-6:
-            return None
-        return (x0, y0), (dx / span, dy / span), (-dy / span, dx / span), span
-
-    def _axle_offset(
-        self, signal_id: str, frame: Frame, axle_x: float, axle_y: float,
-        heading_x: float, heading_y: float,
-    ) -> Optional[float]:
-        """Signed distance from the stop line to the front axle, positive
-        beyond it, or None when the axle is not within the line's own extent.
-        """
-        (x0, y0), (tx, ty), (nx, ny), span = frame
-        rx, ry = axle_x - x0, axle_y - y0
-        along = rx * tx + ry * ty
-        if along < -self.SPAN_TOLERANCE_M or along > span + self.SPAN_TOLERANCE_M:
-            return None
-        # Fix the normal's direction once per line, from the heading the
-        # vehicle first approached it with. Re-deriving it every sample would
-        # flip the sign -- and so fake a crossing -- when a vehicle turns.
-        orientation = self.stop_line_orientation.get(signal_id)
-        if orientation is None:
-            orientation = 1.0 if (nx * heading_x + ny * heading_y) > 0 else -1.0
-            self.stop_line_orientation[signal_id] = orientation
-        return (rx * nx + ry * ny) * orientation
-
     def _check_violation(self) -> None:
-        if self.last_localization is None:
-            return
-        if not self.stop_line_frames:
+        if self.last_localization is None or self.crossings is None:
             return
 
-        pose = self.last_localization.pose.pose
-        heading = quaternion_2_heading(pose.orientation)
-        heading_x, heading_y = math.cos(heading), math.sin(heading)
-        axle_x = pose.position.x + AUTOWARE_VEHICLE_WHEEL_BASE * heading_x
-        axle_y = pose.position.y + AUTOWARE_VEHICLE_WHEEL_BASE * heading_y
-        speed = calculate_velocity(self.last_localization.twist.twist.linear)
-
-        crossed_ids: List[str] = []
-        for signal_id, frame in self.stop_line_frames.items():
-            offset = self._axle_offset(
-                signal_id, frame, axle_x, axle_y, heading_x, heading_y
-            )
-            previous = self.last_axle_offset.get(signal_id)
-            self.last_axle_offset[signal_id] = offset
-            # Both samples must be inside the line's extent: without a `before`
-            # there is no crossing to speak of, only a vehicle that was already
-            # past the line when the recording -- or the red -- began.
-            if offset is None or previous is None:
-                continue
-            if not (previous <= 0.0 < offset):
-                continue
-            if signal_id not in self.red_signal_ids:
-                continue
-            if speed <= self.STOPPED_SPEED_MPS:
-                continue
-            crossed_ids.append(signal_id)
-
+        _, crossed_ids = self.crossings.update(self.last_localization)
         if not crossed_ids:
+            return
+        speed = calculate_velocity(self.last_localization.twist.twist.linear)
+        if speed <= self.STOPPED_SPEED_MPS:
             return
 
         crossed_event_keys: Set[str] = set()
         for signal_id in crossed_ids:
-            event_key = self.signal_id_to_event_key.get(signal_id, f"signal:{signal_id}")
-            crossed_event_keys.add(event_key)
+            if signal_id not in self.red_signal_ids:
+                continue
+            crossed_event_keys.add(
+                self.signal_id_to_event_key.get(signal_id, f"signal:{signal_id}")
+            )
 
         for event_key in crossed_event_keys:
             if event_key in self.violated_event_keys:
@@ -260,7 +167,6 @@ class TrafficSignalOracle(OracleInterface):
 
     def parse_traffic_signal_stop_line_string_on_map(self) -> None:
         self.traffic_signal_stop_line_string_dict = dict()
-        self.stop_line_frames = {}
         self.signal_id_to_event_key = {}
         self.event_key_to_signal_ids = {}
         try:
@@ -275,19 +181,16 @@ class TrafficSignalOracle(OracleInterface):
                 stop_line = map_parser.get_stop_line_for_signal(ts_id)
                 if stop_line is None:
                     continue
-                frame = self._stop_line_frame(stop_line)
-                if frame is None:
-                    continue
                 signal_id = str(ts_id)
                 self.traffic_signal_stop_line_string_dict[signal_id] = stop_line
-                self.stop_line_frames[signal_id] = frame
                 event_key = self._stop_line_event_key(stop_line) or f"signal:{signal_id}"
                 self.signal_id_to_event_key[signal_id] = event_key
                 if event_key not in self.event_key_to_signal_ids:
                     self.event_key_to_signal_ids[event_key] = set()
                 self.event_key_to_signal_ids[event_key].add(signal_id)
         except Exception:
-            return
+            pass
+        self.crossings = StopLineCrossings(self.traffic_signal_stop_line_string_dict)
 
     def get_result(self) -> List[Violation]:
         result: List[Violation] = []
