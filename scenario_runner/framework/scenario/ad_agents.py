@@ -21,6 +21,25 @@ VEHICLE_WIDTH = 2.11
 MIN_VEHICLE_SPACING = 5.0  # Minimum distance between vehicle polygons to avoid collisions
 
 
+def goal_s_on(lane_length: float) -> float:
+    """Where along the final lanelet to put a goal.
+
+    The midpoint, except where that leaves the vehicle hanging off the end.
+    Autoware validates a goal by its FOOTPRINT, and
+    `DefaultPlanner::check_goal_footprint_inside_lanes` builds one corridor from
+    the goal lanelet plus `getNextLanelets().front()` -- a single arbitrary
+    successor, not the union -- so an overhanging footprint is accepted or
+    rejected by which successor happens to be first. Lose that and the mission
+    planner publishes no route: "Goal's footprint exceeds lane!", nothing
+    activates, and the scenario burns its timeout looking like a wedged stack.
+
+    The midpoint already clears it on any lanelet longer than about 7.6 m, since
+    the front reaches 3.79 m ahead of base_link. This only bites on short ones,
+    which is exactly where it is invisible until it happens.
+    """
+    return max(1.5, min(lane_length / 2, lane_length - VEHICLE_LENGTH))
+
+
 @dataclass
 class Orientation:
     x: float
@@ -159,7 +178,7 @@ class ADAgent:
         else:
             start_s = 0.0
 
-        dest_s = round(dest_length / 2, 1)
+        dest_s = round(goal_s_on(dest_length), 1)
         start_pose = ADAgent._pose_from_lane_s(mp, start_lane, start_s)
         goal_pose = ADAgent._pose_from_lane_s(mp, route[-1], dest_s)
 
@@ -185,7 +204,7 @@ class ADAgent:
         else:
             start_s = 0.0
 
-        dest_s = round(dest_length / 2, 1)
+        dest_s = round(goal_s_on(dest_length), 1)
         start_pose = ADAgent._pose_from_lane_s(mp, start_lane, start_s)
         goal_pose = ADAgent._pose_from_lane_s(mp, route[-1], dest_s)
 

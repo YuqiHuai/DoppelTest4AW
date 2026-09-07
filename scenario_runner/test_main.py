@@ -536,6 +536,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--vehicle-container",
+        action="append",
+        dest="vehicle_containers",
+        default=[],
+        help=(
+            "Docker container backing each --url, in the same order. Given "
+            "these, each vehicle's container is restarted between scenarios, "
+            "so no process and no gcov counter is carried into the next one."
+        ),
+    )
+    parser.add_argument(
         "--coverage-per-scenario",
         action="store_true",
         help=(
@@ -693,6 +704,13 @@ def main() -> None:
     runner.set_coverage_build_dir(
         args.coverage_build_dir if args.coverage_per_scenario else None
     )
+    if args.vehicle_containers:
+        if len(args.vehicle_containers) != len(urls):
+            raise SystemExit(
+                f"--vehicle-container given {len(args.vehicle_containers)} times "
+                f"for {len(urls)} vehicles; they are matched by order"
+            )
+        runner.set_vehicle_containers(args.vehicle_containers)
     runner.configure_recovery(
         restart_wait_s=args.restart_wait,
         max_recovery_retries=args.max_recovery_retries,

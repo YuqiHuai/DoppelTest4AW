@@ -109,6 +109,21 @@ class VehicleEndpoint:
     def stop(self):
         return self._post("/change_operation_stop_mode")
 
+    def rebind(self, ip: str) -> None:
+        """Point this endpoint at the same vehicle on a new address."""
+        import re
+        self.base_url = re.sub(r"//[^:/]+", f"//{ip}", self.base_url, count=1)
+
+    def wait_healthy(self, timeout_s: float = 60.0) -> bool:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            try:
+                self.session.get(f"{self.base_url}/health", timeout=3)
+                return True
+            except Exception:
+                time.sleep(2.0)
+        return False
+
     def restart_autoware(self):
         return self._post("/autoware/restart")
 
@@ -229,6 +244,40 @@ class VehicleEndpoint:
         return self._post("/decisions/calculate", timeout=self.analysis_timeout)
 
 
+def _docker(method: str, path: str, timeout: float = 60.0):
+    """Ask the docker daemon for something, over its unix socket.
+
+    Not the docker CLI: this image does not carry one, and installing it into
+    every generator container to issue two requests is a worse dependency than
+    a few lines of http.client.
+    """
+    import http.client
+    import json as _json
+    import socket as _socket
+
+    class _UnixHTTP(http.client.HTTPConnection):
+        def __init__(self, sock_path: str, conn_timeout: float):
+            super().__init__("localhost", timeout=conn_timeout)
+            self._sock_path = sock_path
+
+        def connect(self):
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect(self._sock_path)
+            self.sock = sock
+
+    conn = _UnixHTTP("/var/run/docker.sock", timeout)
+    try:
+        conn.request(method, path)
+        resp = conn.getresponse()
+        body = resp.read()
+        if resp.status >= 400:
+            raise RuntimeError(f"docker {method} {path}: {resp.status} {body[:200]!r}")
+        return _json.loads(body) if body.strip() else None
+    finally:
+        conn.close()
+
+
 def _pose_payload(pose) -> dict:
     orientation = pose.orientation
     return {
@@ -302,6 +351,9 @@ class ScenarioRunner:
         # How long to let a stack reach the state the next step needs. A
         # ceiling, not a delay: the wait ends when the state arrives.
         self._state_wait_s = 60.0
+        # Container name per vehicle, in the order the endpoints were given.
+        # Set when the caller wants each vehicle restarted between scenarios.
+        self._vehicle_containers: List[str] = []
         self._autoware_started = False
         self._sender_started = False
         self._repo_root = Path(__file__).resolve().parents[3]
@@ -428,6 +480,63 @@ class ScenarioRunner:
             "[%s] %s: still %s after %.0fs.", vehicle.name, reason, last, timeout_s
         )
         return False
+
+    def set_vehicle_containers(self, names: Sequence[str]) -> None:
+        """Restart each vehicle's container between scenarios.
+
+        Stopping Autoware is enough for gcov -- measured: all 253 translation
+        units write on exit and nothing writes afterwards -- but only while the
+        stop succeeds. The receiver escalates to SIGKILL after 15 s, and a
+        process killed that way writes no counters at all; one that outlives the
+        archive writes them into the NEXT scenario's. Over the hundreds of
+        scenarios in a campaign, a fresh container is the cheaper guarantee than
+        being right about every teardown.
+
+        The receiver is the container's own command, so a restart brings it back
+        with nothing else alive. The IP can change across a restart, so the
+        endpoint's URL is re-resolved from the container rather than assumed.
+        """
+        self._vehicle_containers = list(names)
+
+    def _restart_vehicle_containers(self, vehicles, scenario_logger) -> None:
+        if not self._vehicle_containers:
+            return
+        started = time.time()
+        by_name = dict(zip(self._vehicle_containers, self.vehicles))
+        for name in self._vehicle_containers:
+            try:
+                _docker("POST", f"/containers/{name}/restart?t=30", timeout=180)
+            except Exception as exc:
+                scenario_logger.warning("[%s] container restart failed: %s", name, exc)
+                continue
+            vehicle = by_name.get(name)
+            if vehicle is None:
+                continue
+            # A restart can move the container's IP; the old URL would then
+            # point at nothing, or -- worse -- at another vehicle.
+            try:
+                info = _docker("GET", f"/containers/{name}/json", timeout=30)
+                nets = (info.get("NetworkSettings") or {}).get("Networks") or {}
+                ip = next((n.get("IPAddress") for n in nets.values() if n.get("IPAddress")), "")
+                if ip:
+                    vehicle.rebind(ip)
+            except Exception as exc:
+                scenario_logger.warning("[%s] could not re-resolve its address: %s", name, exc)
+
+        # The receiver comes up with the container; wait for it before the next
+        # scenario asks it for anything.
+        for name in self._vehicle_containers:
+            vehicle = by_name.get(name)
+            if vehicle is None:
+                continue
+            if not vehicle.wait_healthy(60.0):
+                scenario_logger.warning(
+                    "[%s] receiver did not answer /health after the restart", name
+                )
+        scenario_logger.info(
+            "restarted %d vehicle containers in %.1fs",
+            len(self._vehicle_containers), time.time() - started,
+        )
 
     def set_coverage_build_dir(self, build_dir: Optional[str]) -> None:
         """Harvest gcov counters into each scenario's record directory.
@@ -1011,6 +1120,10 @@ class ScenarioRunner:
         self._harvest_coverage(
             active_runs, f"{generation_name}_{scenario_name}", scenario_logger
         )
+        # AFTER the archive: the restart is what guarantees the next scenario
+        # starts with no process of this one alive, and the archive must be
+        # taken while the counters this scenario produced are still there.
+        self._restart_vehicle_containers(active_vehicles, scenario_logger)
 
         scenario_logger.info(
             f"Scenario end: {generation_name} {scenario_name} "
