@@ -957,6 +957,18 @@ class ScenarioRunner:
             f"(limit={SCENARIO_UPPER_LIMIT}s)"
         )
         scenario_logger.info("Active vehicles this scenario: %s", len(active_vehicles))
+        # BEFORE the scenario, not after it. Restarting at the end also wiped
+        # the receivers' in-memory record path, and the caller asks each of them
+        # for violations and decisions AFTER run_scenario returns -- so every
+        # analysis came back "No rosbag recording has been started yet" and
+        # every scenario scored min_distance=inf with no violations. The bags
+        # and the coverage were still written; only the grading was lost, which
+        # is exactly the kind of failure that looks like a working campaign.
+        # Restarting here gives the same guarantee -- nothing from the previous
+        # scenario is alive during this one -- and leaves the receiver up
+        # afterwards to be asked about what it recorded.
+        self._restart_vehicle_containers(active_vehicles, scenario_logger)
+
         # Mixed-size runs require per-scenario startup checks.
         scenario_logger.info("Ensuring Autoware is running for active vehicles...")
         autoware_map_path = self._resolve_autoware_map_path()
@@ -1117,13 +1129,12 @@ class ScenarioRunner:
                         "[%s] stop_logging failed during cleanup: %s", vehicle.name, exc
                     )
 
+        # The archive must be taken while this scenario's counters are still in
+        # the build tree; the reset that follows happens at the START of the
+        # next scenario, so the receivers stay up to be asked what they saw.
         self._harvest_coverage(
             active_runs, f"{generation_name}_{scenario_name}", scenario_logger
         )
-        # AFTER the archive: the restart is what guarantees the next scenario
-        # starts with no process of this one alive, and the archive must be
-        # taken while the counters this scenario produced are still there.
-        self._restart_vehicle_containers(active_vehicles, scenario_logger)
 
         scenario_logger.info(
             f"Scenario end: {generation_name} {scenario_name} "
