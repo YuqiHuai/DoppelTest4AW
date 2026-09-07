@@ -299,6 +299,9 @@ class ScenarioRunner:
         # Per-scenario coverage: the gcov build directory to harvest .gcda from
         # after each scenario, or None to leave coverage alone.
         self._coverage_build_dir: Optional[str] = None
+        # How long to let a stack reach the state the next step needs. A
+        # ceiling, not a delay: the wait ends when the state arrives.
+        self._state_wait_s = 60.0
         self._autoware_started = False
         self._sender_started = False
         self._repo_root = Path(__file__).resolve().parents[3]
@@ -384,6 +387,47 @@ class ScenarioRunner:
             return False
         self.logger.info("%s: all vehicles ready in %.1fs.", reason, time.time() - started)
         return True
+
+    def _wait_for_state(
+        self, vehicle, states: Sequence[str], timeout_s: float, reason: str
+    ) -> bool:
+        """Wait for a vehicle to reach one of `states`, or give up after timeout.
+
+        The states are the stack's own account of what it is doing. Sleeping a
+        fixed time instead assumes the slowest case is the one you guessed:
+        after set_route the planner sits in PLANNING until it has a trajectory,
+        and asking for autonomous mode before then is refused as "not
+        available" -- which the caller reads as a broken stack and answers with
+        a restart, so a slow plan costs a whole scenario instead of a few
+        seconds. Measured with five vehicles: the fifth needed longer than the
+        10 s it was given, every time, and the scenario looped through all
+        three recovery attempts on it.
+
+        Returns False on timeout; the caller keeps its own recovery for that.
+        """
+        started = time.time()
+        last = None
+        while (time.time() - started) < timeout_s:
+            try:
+                status = vehicle.autoware_status()
+            except Exception:
+                time.sleep(1.0)
+                continue
+            if "state" not in status:      # receiver from before this existed
+                time.sleep(max(timeout_s - (time.time() - started), 0.0))
+                return True
+            last = status.get("state")
+            if last in states:
+                self.logger.info(
+                    "[%s] %s after %.1fs (%s).", vehicle.name, reason,
+                    time.time() - started, last,
+                )
+                return True
+            time.sleep(1.0)
+        self.logger.warning(
+            "[%s] %s: still %s after %.0fs.", vehicle.name, reason, last, timeout_s
+        )
+        return False
 
     def set_coverage_build_dir(self, build_dir: Optional[str]) -> None:
         """Harvest gcov counters into each scenario's record directory.
@@ -769,10 +813,19 @@ class ScenarioRunner:
         self.logger.info("[%s] reset done", vehicle.name)
         vehicle.initialize_localization(start_pose)
         self.logger.info("[%s] initialize_localization done", vehicle.name)
-        time.sleep(10.0)
+        # Localized when the stack leaves INITIALIZING; it cannot accept a
+        # route before that.
+        self._wait_for_state(
+            vehicle, ("WAITING_FOR_ROUTE", "PLANNING", "WAITING_FOR_ENGAGE"),
+            self._state_wait_s, "localized",
+        )
         vehicle.set_route(start_pose, goal_pose)
         self.logger.info("[%s] set_route done", vehicle.name)
-        time.sleep(10.0)
+        # Engageable only once the planner has a trajectory. This is the wait
+        # that used to be 10 s and cost whole scenarios when it was not enough.
+        self._wait_for_state(
+            vehicle, ("WAITING_FOR_ENGAGE",), self._state_wait_s, "route planned",
+        )
 
     def run_scenario(
         self, generation_name: str, scenario_name: str, save_record: bool = False
