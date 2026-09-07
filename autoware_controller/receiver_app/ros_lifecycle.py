@@ -1,4 +1,5 @@
 import threading
+import time
 
 import rclpy
 from autoware_adapi_v1_msgs.srv import (
@@ -8,12 +9,14 @@ from autoware_adapi_v1_msgs.srv import (
     SetRoutePoints,
 )
 from autoware_perception_msgs.msg import DetectedObjects, TrafficLightGroupArray
+from autoware_system_msgs.msg import AutowareState
 from fastapi import FastAPI
 from rclpy.node import Node
 
 from .config import (
     ROS_DETECTION_TOPIC,
     ROS_NODE_NAME_SERVER,
+    ROS_STATE_TOPIC,
     ROS_TRAFFIC_SIGNAL_TOPIC,
 )
 from .logging_setup import ros_info_logger
@@ -90,6 +93,23 @@ def register_lifecycle_handlers(app: FastAPI) -> None:
         node.get_logger().info(
             f"Traffic signal publisher created for topic {ROS_TRAFFIC_SIGNAL_TOPIC}."
         )
+
+        # The stack's own account of whether it is up. Without it the only
+        # readiness signal a caller has is that the `ros2 launch` process
+        # exists, which is true a second after launch and says nothing about
+        # the planner, the map or the vehicle interface -- so callers wait a
+        # fixed time chosen with margin instead.
+        def _on_autoware_state(msg: AutowareState) -> None:
+            server_globals["autoware_state"] = {
+                "code": int(msg.state),
+                "at": time.time(),
+            }
+
+        server_globals["autoware_state"] = None
+        server_globals["autoware_state_sub"] = node.create_subscription(
+            AutowareState, ROS_STATE_TOPIC, _on_autoware_state, 1
+        )
+        node.get_logger().info(f"Subscribed to {ROS_STATE_TOPIC}.")
 
         auto_mode_service = "/api/operation_mode/change_to_autonomous"
         server_globals["change_mode_auto_client"] = node.create_client(

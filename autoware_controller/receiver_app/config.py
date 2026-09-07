@@ -6,6 +6,7 @@ UVICORN_HOST = "0.0.0.0"
 UVICORN_PORT = 5002
 ROS_DETECTION_TOPIC = "/perception/object_recognition/detection/objects"
 ROS_TRAFFIC_SIGNAL_TOPIC = "/perception/traffic_light_recognition/traffic_signals"
+ROS_STATE_TOPIC = "/autoware/state"
 
 ROS_DOMAIN_ID = os.environ.get("ROS_DOMAIN_ID", "1")
 os.environ["ROS_DOMAIN_ID"] = ROS_DOMAIN_ID

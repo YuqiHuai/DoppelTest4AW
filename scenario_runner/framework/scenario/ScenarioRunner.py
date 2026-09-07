@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 import time
 import uuid
 from logging import Logger
@@ -110,6 +111,9 @@ class VehicleEndpoint:
 
     def restart_autoware(self):
         return self._post("/autoware/restart")
+
+    def stop_autoware(self):
+        return self._post("/autoware/stop", timeout=60)
 
     def start_logging(self, filename: str, record_root: Optional[str] = None):
         payload = {"filename": filename}
@@ -292,6 +296,9 @@ class ScenarioRunner:
         # Where this campaign's bags go, as a repo-relative path the containers
         # can resolve. None keeps each receiver's own container_<n>/log tree.
         self._record_root: Optional[str] = None
+        # Per-scenario coverage: the gcov build directory to harvest .gcda from
+        # after each scenario, or None to leave coverage alone.
+        self._coverage_build_dir: Optional[str] = None
         self._autoware_started = False
         self._sender_started = False
         self._repo_root = Path(__file__).resolve().parents[3]
@@ -322,6 +329,152 @@ class ScenarioRunner:
         means visiting N directories and joining them by filename.
         """
         self._record_root = str(record_root) if record_root else None
+
+    def _wait_until_ready(self, vehicles, timeout_s: float, reason: str) -> bool:
+        """Wait for the stacks to say they are up, instead of sleeping.
+
+        `ros2 launch` returns immediately and its process lives for the whole
+        run, so "the launch is alive" is not readiness -- which is why this
+        used to be a fixed sleep long enough to cover the worst case. The
+        receiver now reports whether the ADAPI services this is about to call
+        exist and whether /autoware/state is arriving, so the wait can end when
+        the stack is actually ready and the fixed time becomes the timeout.
+
+        Returns False if any vehicle never became ready; the caller carries on,
+        because the scenario's own recovery path is better at judging that than
+        a timeout is.
+        """
+        pending = list(vehicles)
+        started = time.time()
+        legacy = False
+        while pending and (time.time() - started) < timeout_s:
+            for vehicle in list(pending):
+                try:
+                    status = vehicle.autoware_status()
+                except Exception:
+                    continue
+                if "ready" not in status:
+                    # A receiver from before this reported readiness at all.
+                    legacy = True
+                    pending = []
+                    break
+                if status.get("ready"):
+                    pending.remove(vehicle)
+                    self.logger.info(
+                        "[%s] Autoware ready after %.1fs (%s).",
+                        vehicle.name, time.time() - started, status.get("state"),
+                    )
+            if pending:
+                time.sleep(2.0)
+
+        if legacy:
+            remaining = timeout_s - (time.time() - started)
+            self.logger.info(
+                "Receiver does not report readiness; falling back to waiting %.0fs.",
+                max(remaining, 0.0),
+            )
+            if remaining > 0:
+                time.sleep(remaining)
+            return True
+        if pending:
+            self.logger.warning(
+                "%s: %s not ready after %.0fs; continuing anyway.",
+                reason, ", ".join(v.name for v in pending), timeout_s,
+            )
+            return False
+        self.logger.info("%s: all vehicles ready in %.1fs.", reason, time.time() - started)
+        return True
+
+    def set_coverage_build_dir(self, build_dir: Optional[str]) -> None:
+        """Harvest gcov counters into each scenario's record directory.
+
+        gcov writes a translation unit's .gcda when the process that owns it
+        exits, and it MERGES into whatever .gcda is already there. A search
+        that keeps one Autoware launch across every scenario therefore produces
+        one union at the end and nothing per scenario -- so attributing
+        coverage to the test case that caused it means ending the stack after
+        each one, taking the counters, and clearing them before the next.
+
+        That costs a relaunch per scenario (about a minute). Only the harvest
+        happens here; turning the counters into a report is slow (minutes of
+        gcovr) and belongs offline, which is why the .gcda are archived rather
+        than analysed.
+        """
+        self._coverage_build_dir = build_dir or None
+
+    def _harvest_coverage(
+        self, active_runs, scenario_dir: str, scenario_logger
+    ) -> None:
+        build = self._coverage_build_dir
+        if not build or not self._record_root or not active_runs:
+            return
+        import glob
+        import subprocess
+
+        if not os.path.isdir(build):
+            scenario_logger.warning("coverage: no build directory at %s", build)
+            return
+
+        # Every vehicle shares this build tree, so all of them have to be down
+        # before the counters are complete: one still driving keeps writing.
+        for vehicle, _adc in active_runs:
+            try:
+                vehicle.stop_autoware()
+            except Exception as exc:
+                scenario_logger.warning(
+                    "[%s] coverage: stopping Autoware failed: %s", vehicle.name, exc
+                )
+
+        # The launch parent exits before its component containers do, so wait
+        # for the file count to stop moving rather than for a fixed time.
+        pattern = os.path.join(build, "**", "*.gcda")
+        prev = -1
+        for _ in range(30):
+            count = len(glob.glob(pattern, recursive=True))
+            if count and count == prev:
+                break
+            prev = count
+            time.sleep(2.0)
+        if not prev:
+            scenario_logger.warning(
+                "coverage: no .gcda after stopping the stack -- is this the coverage build?"
+            )
+            return
+
+        out_dir = os.path.join(self._record_root, scenario_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        # Absolute: tar changes directory into the build tree below, and a
+        # relative archive path would then be written inside it.
+        archive = os.path.abspath(os.path.join(out_dir, "coverage.tar.gz"))
+        # Paths relative to the build directory, so restoring is unambiguous:
+        # gcov needs each .gcda beside the .gcno it was compiled with.
+        try:
+            find = subprocess.run(
+                ["find", ".", "-name", "*.gcda", "-print0"],
+                cwd=build, check=True, stdout=subprocess.PIPE,
+            )
+            # -C BEFORE -T: tar applies options in order, so a -C after the
+            # file list leaves those names resolved against the wrong
+            # directory and every one of them is "not found".
+            subprocess.run(
+                ["tar", "-czf", archive, "-C", build, "--null", "-T", "-"],
+                input=find.stdout, check=True,
+            )
+            size_mb = os.path.getsize(archive) / 1048576
+            scenario_logger.info(
+                "coverage: %d translation units -> %s (%.1f MB)", prev, archive, size_mb
+            )
+        except Exception as exc:
+            scenario_logger.warning("coverage: archiving failed: %s", exc)
+            return
+
+        # Clear, so the next scenario's counters are its own. Deleting is what
+        # `lcov --zerocounters` does, without needing lcov in this container.
+        for path in glob.glob(pattern, recursive=True):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def configure_recovery(
         self, restart_wait_s: float = 60.0, max_recovery_retries: int = 3
@@ -406,11 +559,11 @@ class ScenarioRunner:
             
             self._autoware_started = True
             self.logger.info(
-                "[%s] restart requested; sleeping %ss before restarting senders.",
+                "[%s] restart requested; waiting up to %ss before restarting senders.",
                 vehicle.name,
                 self._restart_wait_s,
             )
-            time.sleep(self._restart_wait_s)
+            self._wait_until_ready([vehicle], self._restart_wait_s, "Autoware recovery")
             self.logger.info("[%s] restart wait complete.", vehicle.name)
             
             # Refresh sender peer wiring after recovery.
@@ -633,13 +786,14 @@ class ScenarioRunner:
                 raise
         if started_any_autoware:
             scenario_logger.info(
-                "Autoware start requested; waiting %ss for startup.",
+                "Autoware start requested; waiting up to %ss for it to come up.",
                 self._restart_wait_s,
             )
-            time.sleep(self._restart_wait_s)
+            self._wait_until_ready(active_vehicles, self._restart_wait_s, "Autoware startup")
         else:
-            scenario_logger.info("Autoware already running on active vehicles; waiting 10s.")
-            time.sleep(10.0)
+            # Already up, but a previous scenario may have left it mid-teardown.
+            scenario_logger.info("Autoware already running on active vehicles.")
+            self._wait_until_ready(active_vehicles, 10.0, "Autoware already running")
         self._autoware_started = True
 
         if inactive_vehicles:
@@ -772,6 +926,10 @@ class ScenarioRunner:
                     scenario_logger.warning(
                         "[%s] stop_logging failed during cleanup: %s", vehicle.name, exc
                     )
+
+        self._harvest_coverage(
+            active_runs, f"{generation_name}_{scenario_name}", scenario_logger
+        )
 
         scenario_logger.info(
             f"Scenario end: {generation_name} {scenario_name} "

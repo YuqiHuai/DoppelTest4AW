@@ -642,14 +642,49 @@ async def autoware_restart(request: AutowareLaunchRequest = AutowareLaunchReques
     return await autoware_start(request)
 
 
+#: AutowareState.state, which the message defines but does not name at runtime.
+AUTOWARE_STATES = {
+    1: "INITIALIZING", 2: "WAITING_FOR_ROUTE", 3: "PLANNING",
+    4: "WAITING_FOR_ENGAGE", 5: "DRIVING", 6: "ARRIVED_GOAL", 7: "FINALIZING",
+}
+
+#: The services a scenario is about to call. `ready` means these exist, which
+#: is a stronger claim than "the launch process is alive" and a more useful one
+#: than any single state value: at startup the stack sits in INITIALIZING until
+#: someone initializes localization, so waiting for a state past it would wait
+#: forever.
+_READY_CLIENTS = ("init_localization_client", "set_route_points_client",
+                  "change_mode_auto_client")
+
+
 @router.get("/autoware/status")
 async def autoware_status():
     process = server_globals.get("autoware_process")
     running = process is not None and process.poll() is None
+
+    state = server_globals.get("autoware_state")
+    services = {}
+    for key in _READY_CLIENTS:
+        client = server_globals.get(key)
+        try:
+            services[key] = bool(client and client.service_is_ready())
+        except Exception:
+            services[key] = False
+
     return {
         "running": running,
         "pid": process.pid if running else None,
         "command": server_globals.get("autoware_launch_cmd"),
+        "state": AUTOWARE_STATES.get(state["code"]) if state else None,
+        "state_code": state["code"] if state else None,
+        "state_age_s": round(time.time() - state["at"], 2) if state else None,
+        "services": services,
+        # Stale state means the stack died: the topic stops rather than
+        # reporting anything about it.
+        "ready": bool(
+            running and state and (time.time() - state["at"]) < 5.0
+            and all(services.values())
+        ),
     }
 
 

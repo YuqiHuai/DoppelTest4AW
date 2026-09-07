@@ -536,6 +536,21 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--coverage-per-scenario",
+        action="store_true",
+        help=(
+            "After each scenario, stop every vehicle's stack, archive the gcov "
+            "counters into that scenario's record directory and clear them. "
+            "Costs a relaunch per scenario; without it coverage is one union "
+            "over the whole run and cannot be attributed to a test case."
+        ),
+    )
+    parser.add_argument(
+        "--coverage-build-dir",
+        default="/ss2_ws/cov_ws/build",
+        help="gcov build directory to harvest .gcda from.",
+    )
+    parser.add_argument(
         "--conflict-only",
         action="store_true",
         default=True,
@@ -675,6 +690,9 @@ def main() -> None:
     endpoints = [VehicleEndpoint(f"vehicle_{i}", url) for i, url in enumerate(urls)]
     runner = ScenarioRunner(endpoints)
     runner.set_record_root(record_root)
+    runner.set_coverage_build_dir(
+        args.coverage_build_dir if args.coverage_per_scenario else None
+    )
     runner.configure_recovery(
         restart_wait_s=args.restart_wait,
         max_recovery_retries=args.max_recovery_retries,

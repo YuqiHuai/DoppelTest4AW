@@ -210,6 +210,38 @@ curl -X POST http://127.0.0.1:5002/sender/start \
   }'
 ```
 
+## Coverage per test case
+
+With the gcov build mounted (see MozartTest-Autoware `harness/doppel`),
+`--coverage-per-scenario` archives each scenario's counters into that
+scenario's record directory and clears them, so coverage belongs to the test
+case that produced it rather than to the campaign:
+
+```text
+out/<id>_<map>/records/<Generation_XXXXX_Scenario_XXXXX>/coverage.tar.gz
+```
+
+About 2.1 MB per scenario. gcov writes a translation unit's .gcda only when the
+process owning it exits, and merges into whatever is already there, so this
+costs stopping the stack after every scenario -- which is also why a run that
+keeps one launch across the search can only ever produce one union. Turning an
+archive into a report is minutes of gcovr and is done offline, by that repo's
+`harness/doppel/scenario_coverage.sh`.
+
+## Waiting for Autoware
+
+`--restart-wait` is a timeout now, not a delay. The receiver subscribes to
+`/autoware/state` and reports on `/autoware/status` whether the ADAPI services
+a scenario is about to call exist, so the runner waits for the stack to say it
+is up. `ros2 launch` returns immediately and its process outlives the run, so
+"the launch is alive" was never readiness -- the old fixed 60 s was margin
+around a guess. Measured on this stack: ready in **12 s**, and a scenario in a
+per-scenario-coverage run went from 156 s to 108 s.
+
+The stack sits in `INITIALIZING` until someone initializes localization, so
+readiness is defined as those services existing plus `/autoware/state`
+arriving, not as reaching a particular state.
+
 ## Runtime Parameters
 Main parameters still relevant in the current code:
 - `ROS_DOMAIN_ID`: per-container ROS 2 isolation; assigned automatically by `start.sh`, `dev_start.sh`, and `dev_into.sh`
