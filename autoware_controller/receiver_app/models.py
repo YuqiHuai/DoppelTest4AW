@@ -24,6 +24,12 @@ class SetRoutePointsRequest(BaseModel):
 
 class StartLoggingRequest(BaseModel):
     filename: str
+    # Directory to record into, absolute or relative to the repository root.
+    # Defaults to the receiver's own container_<domain>/log/record_log. A
+    # campaign sets it so every vehicle's bag for one scenario lands together
+    # under that run's output directory, instead of being scattered across the
+    # containers that happened to record them.
+    record_root: Optional[str] = None
 
 
 class AutowareLaunchRequest(BaseModel):

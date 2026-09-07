@@ -662,8 +662,14 @@ async def start_logging(request: StartLoggingRequest):
         )
 
     filename = request.filename
-    RECORD_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    output_dir = RECORD_LOG_DIR / filename
+    if request.record_root:
+        record_root = pathlib.Path(request.record_root)
+        if not record_root.is_absolute():
+            record_root = (REPO_ROOT / record_root).resolve()
+    else:
+        record_root = RECORD_LOG_DIR
+    record_root.mkdir(parents=True, exist_ok=True)
+    output_dir = record_root / filename
     command = [
         "ros2",
         "bag",

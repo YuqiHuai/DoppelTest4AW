@@ -170,7 +170,7 @@ uv run --script scenario_runner/test_main.py \
 ```
 
 Useful flags:
-- `--log-dir`: output directory for scenario JSON files and GA logs
+- `--out-dir`: the run directory (see *Outputs*); `--log-dir` is an alias
 - `--restart-wait`: wait time after Autoware restart, default `60`
 - `--max-recovery-retries`: per-scenario recovery attempts before marking failure
 - `--conflict-only`: generate only conflict scenarios
@@ -224,15 +224,32 @@ Removed:
 - `RECEIVER_INSTANCE`
 
 ## Outputs
-`test_main.py` writes to the selected `--log-dir`:
-- `test_main.log`
-- `Generation_XXXXX_Scenario_XXXXX.json`
-- `GA_selection_gen_XXXXX.json`
+`test_main.py` writes everything one run produced under one directory,
+`--out-dir` (default `out/<timestamp>_<map>`):
 
-Receiver logs default to:
+```text
+out/<id>_<map>/
+  input/Generation_XXXXX_Scenario_XXXXX.json   the generated scenarios
+  input/GA_selection_gen_XXXXX.json
+  records/Generation_XXXXX_Scenario_XXXXX/     one bag per vehicle
+  test_main.log
+```
+
+The bags are the reason the run directory exists. A scenario's evidence is one
+bag per vehicle, and each is recorded by a different container; without a
+per-run record root they land in `container_<n>/log/record_log/` and reading a
+scenario back means visiting N directories and joining them by filename.
+`--out-dir` is passed to each receiver as `record_root`, so they write into the
+run instead.
+
+Receiver and Autoware logs stay where the container put them, because they
+belong to the container rather than to the run:
+
 ```text
 container_<ROS_DOMAIN_ID>/log/
 ```
+
+`--log-dir` is still accepted as a spelling of `--out-dir`.
 
 ## Manual Control
 Start one container:

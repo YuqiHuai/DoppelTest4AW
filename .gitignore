@@ -41,3 +41,6 @@ metadata.yaml
 *.db3
 # Per-container receiver logs and rosbags
 container_*/
+
+# Campaign output: scenarios, bags, logs
+out/

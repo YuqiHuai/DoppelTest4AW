@@ -111,8 +111,11 @@ class VehicleEndpoint:
     def restart_autoware(self):
         return self._post("/autoware/restart")
 
-    def start_logging(self, filename: str):
-        return self._post("/logging/start", {"filename": filename})
+    def start_logging(self, filename: str, record_root: Optional[str] = None):
+        payload = {"filename": filename}
+        if record_root:
+            payload["record_root"] = record_root
+        return self._post("/logging/start", payload)
 
     def stop_logging(self):
         try:
@@ -286,6 +289,9 @@ class ScenarioRunner:
         self._pedestrian_ids: List[str] = []
         self._restart_wait_s = 60.0
         self._max_recovery_retries = 3
+        # Where this campaign's bags go, as a repo-relative path the containers
+        # can resolve. None keeps each receiver's own container_<n>/log tree.
+        self._record_root: Optional[str] = None
         self._autoware_started = False
         self._sender_started = False
         self._repo_root = Path(__file__).resolve().parents[3]
@@ -307,6 +313,15 @@ class ScenarioRunner:
             # Return a repo-relative path so the container can resolve it.
             return str(Path("autoware_map") / map_name)
         return str(map_dir)
+
+    def set_record_root(self, record_root: Optional[str]) -> None:
+        """Record every vehicle's bag under one run directory.
+
+        A scenario's evidence is one bag per vehicle, and without this each one
+        lands in the container that recorded it -- so reading a scenario back
+        means visiting N directories and joining them by filename.
+        """
+        self._record_root = str(record_root) if record_root else None
 
     def configure_recovery(
         self, restart_wait_s: float = 60.0, max_recovery_retries: int = 3
@@ -658,9 +673,16 @@ class ScenarioRunner:
             if not save_record or not active_runs:
                 return
             log_ts = int(time.time())
+            # One directory per scenario, one bag per vehicle inside it. The
+            # timestamp stays on the bag rather than the scenario directory so a
+            # recovery restart within a scenario adds a bag instead of a
+            # directory nothing links to the scenario.
+            scenario_dir = f"{generation_name}_{scenario_name}"
+            root = f"{self._record_root}/{scenario_dir}" if self._record_root else None
             for vehicle, _adc in active_runs:
-                log_name = f"{generation_name}_{scenario_name}_{vehicle.name}_{log_ts}"
-                vehicle.start_logging(log_name)
+                log_name = (f"{vehicle.name}_{log_ts}" if root
+                            else f"{generation_name}_{scenario_name}_{vehicle.name}_{log_ts}")
+                vehicle.start_logging(log_name, record_root=root)
 
         _start_logging_for_active_runs()
 

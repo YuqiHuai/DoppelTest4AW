@@ -503,9 +503,16 @@ def main() -> None:
         help="Duration to run in hours (used when generations=0).",
     )
     parser.add_argument(
+        "--out-dir",
         "--log-dir",
-        default="scenario_runs",
-        help="Directory to store scenario run metadata.",
+        dest="out_dir",
+        default=None,
+        help=(
+            "Run directory, absolute or relative to the repository root. "
+            "Defaults to out/<timestamp>_<map>. Holds input/ (the generated "
+            "scenarios and GA selection logs), records/<scenario>/ (one bag "
+            "per vehicle) and test_main.log."
+        ),
     )
     parser.add_argument(
         "--restart-wait",
@@ -612,9 +619,16 @@ def main() -> None:
                 flush=True,
             )
     print(f"[GA] Receiver endpoints: {urls}", flush=True)
-    log_dir = Path(args.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "test_main.log"
+    # out/<id>_<map>, the same shape scenoRITA campaigns use: everything one
+    # run produced under one directory, named for what it ran.
+    map_name = Path(args.map).parent.name or "map"
+    out_dir = Path(args.out_dir or f"out/{time.strftime('%m%d_%H%M%S')}_{map_name}")
+    input_dir = out_dir / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    # A repo-relative path stays repo-relative: the receivers resolve it
+    # against their own copy of this checkout, which is the same bind mount.
+    record_root = str(out_dir / "records")
+    log_path = out_dir / "test_main.log"
 
     class _Tee:
         def __init__(self, *streams):
@@ -633,7 +647,8 @@ def main() -> None:
     sys.stdout = _Tee(sys.stdout, log_file)
     sys.stderr = _Tee(sys.stderr, log_file)
 
-    print(f"[GA] Log dir: {log_dir.resolve()}", flush=True)
+    print(f"[GA] Out dir: {out_dir.resolve()}", flush=True)
+    print(f"[GA] Records:  {record_root}", flush=True)
     print(f"[GA] Log file: {log_path.resolve()}", flush=True)
 
     def _scenario_to_dict(scenario: Scenario) -> Dict[str, Any]:
@@ -659,6 +674,7 @@ def main() -> None:
     # Create endpoints for the maximum configured vehicle count.
     endpoints = [VehicleEndpoint(f"vehicle_{i}", url) for i, url in enumerate(urls)]
     runner = ScenarioRunner(endpoints)
+    runner.set_record_root(record_root)
     runner.configure_recovery(
         restart_wait_s=args.restart_wait,
         max_recovery_retries=args.max_recovery_retries,
@@ -672,7 +688,7 @@ def main() -> None:
         """
         g_name = f"Generation_{ind.gid:05d}"
         s_name = f"Scenario_{ind.cid:05d}"
-        log_path = log_dir / f"{g_name}_{s_name}.json"
+        log_path = input_dir / f"{g_name}_{s_name}.json"
         discard_regen_count = 0
         max_discard_regen = 50
 
@@ -922,7 +938,7 @@ def main() -> None:
                 for ind in population
             ],
         }
-        sel_path = log_dir / f"GA_selection_gen_{curr_gen:05d}.json"
+        sel_path = input_dir / f"GA_selection_gen_{curr_gen:05d}.json"
         print(f"[GA] Writing selection log: {sel_path}", flush=True)
         try:
             with open(sel_path, "w", encoding="utf-8") as fp:
