@@ -221,7 +221,11 @@ case that produced it rather than to the campaign:
 out/<id>_<map>/records/<Generation_XXXXX_Scenario_XXXXX>/coverage.tar.gz
 ```
 
-About 2.1 MB per scenario. gcov writes a translation unit's .gcda only when the
+About 2.1 MB per scenario, plus one 35 MB `out/<id>_<map>/coverage/gcno.tar.gz`
+for the whole run: gcovr needs the structure the compiler emitted as well as
+the counts, and those .gcno live only in a build tree that a coverage rebuild
+wipes. Keeping the counters without them leaves a run that cannot be analysed
+later, which is the failure this exists to prevent. gcov writes a translation unit's .gcda only when the
 process owning it exits, and merges into whatever is already there, so this
 costs stopping the stack after every scenario -- which is also why a run that
 keeps one launch across the search can only ever produce one union. Turning an

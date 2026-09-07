@@ -441,6 +441,34 @@ class ScenarioRunner:
             )
             return
 
+        # The .gcno are the other half of a coverage report: gcov needs the
+        # structure the compiler emitted as well as the counts. They live only
+        # in the build tree, which `coverage build` wipes, and they carry the
+        # compiler's version stamp, so counters outlive their .gcno and become
+        # unreadable. Snapshot them ONCE per run -- they are identical for
+        # every scenario in it, 388 MB raw and 36 MB compressed.
+        run_dir = os.path.dirname(self._record_root.rstrip("/"))
+        gcno_archive = os.path.abspath(
+            os.path.join(run_dir, "coverage", "gcno.tar.gz")
+        )
+        if not os.path.exists(gcno_archive):
+            os.makedirs(os.path.dirname(gcno_archive), exist_ok=True)
+            try:
+                names = subprocess.run(
+                    ["find", ".", "-name", "*.gcno", "-print0"],
+                    cwd=build, check=True, stdout=subprocess.PIPE,
+                )
+                subprocess.run(
+                    ["tar", "-czf", gcno_archive, "-C", build, "--null", "-T", "-"],
+                    input=names.stdout, check=True,
+                )
+                scenario_logger.info(
+                    "coverage: build structure -> %s (%.1f MB, once per run)",
+                    gcno_archive, os.path.getsize(gcno_archive) / 1048576,
+                )
+            except Exception as exc:
+                scenario_logger.warning("coverage: archiving .gcno failed: %s", exc)
+
         out_dir = os.path.join(self._record_root, scenario_dir)
         os.makedirs(out_dir, exist_ok=True)
         # Absolute: tar changes directory into the build tree below, and a
