@@ -705,10 +705,25 @@ async def start_logging(request: StartLoggingRequest):
         record_root = RECORD_LOG_DIR
     record_root.mkdir(parents=True, exist_ok=True)
     output_dir = record_root / filename
-    command = [
-        "ros2",
-        "bag",
-        "record",
+    # ONE regex, not a topic list plus a regex.
+    #
+    # `ros2 bag record <topics> --regex <pattern>` records NOTHING -- measured
+    # against a live stack in MozartTest's receiver, 0 topics against 29 for
+    # the same set expressed as a single alternation. The factor topics have to
+    # come in by pattern, because there is one per module and the set depends
+    # on the map and the build, so the fixed topics join them in the pattern
+    # rather than beside it.
+    #
+    # Naming only three factor topics is what this replaces. Every
+    # behavior_velocity module publishes on its own
+    # /planning/planning_factors/<module>, and none of those was recorded, so
+    # the three 12 h runs of 2026-09-06..08 answer RQ1 with eleven zeros for a
+    # behaviour set the planner demonstrably exercised: the same bags carry
+    # 172733 messages on the intersection virtual-wall topic, and the beacon
+    # names bvp::crosswalk, bvp::blind_spot, bvp::intersection and
+    # bvp::traffic_light acting in most scenarios. The zeros were the recording,
+    # not the driving.
+    recorded = [
         "/tf",
         "/tf_static",
         "/localization/acceleration",
@@ -721,9 +736,6 @@ async def start_logging(request: StartLoggingRequest):
         "/planning/mission_planning/route",
         "/planning/path_candidate/lane_change_left",
         "/planning/path_candidate/lane_change_right",
-        "/planning/planning_factors/behavior_path_planner",
-        "/planning/planning_factors/lane_change_left",
-        "/planning/planning_factors/lane_change_right",
         "/api/planning/velocity_factors",
         "/control/command/control_cmd",
         "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/intersection",
@@ -736,6 +748,26 @@ async def start_logging(request: StartLoggingRequest):
         # lets MozartTest's harness/ssv2/beacon_intervals.py read activation
         # intervals straight out of a DoppelTest bag.
         "/planning/module_activation",
+    ]
+    # The literals are escaped so a "." in a topic name cannot act as a
+    # wildcard; the factor pattern is appended AFTER that and must not be,
+    # since its ".*" is the whole point. Escaping it would yield a literal
+    # "\.\*" that matches no topic at all -- which fails exactly like the old
+    # list did, silently and with a bag that still looks plausible.
+    #
+    # One per module, and which modules exist depends on the map and the build,
+    # so a pattern rather than a list. Subsumes the three that used to be named
+    # here (behavior_path_planner, lane_change_left/right).
+    pattern = "^(" + "|".join(
+        [t.replace(".", r"\.") for t in recorded]
+        + [r"/planning/planning_factors/.*"]
+    ) + ")$"
+    command = [
+        "ros2",
+        "bag",
+        "record",
+        "--regex",
+        pattern,
         "--output",
         str(output_dir),
     ]
