@@ -37,6 +37,7 @@ class TrafficSignalOracle(OracleInterface):
     crossings: Optional[StopLineCrossings]
     signal_id_to_event_key: Dict[str, str]
     event_key_to_signal_ids: Dict[str, Set[str]]
+    signal_id_to_lane_ids: Dict[str, Set[int]]
     violated_event_keys: Set[str]
     violation_features: Dict[str, dict]
 
@@ -48,6 +49,7 @@ class TrafficSignalOracle(OracleInterface):
         self.crossings = None
         self.signal_id_to_event_key = {}
         self.event_key_to_signal_ids = {}
+        self.signal_id_to_lane_ids = {}
         self.violated_event_keys = set()
         self.violation_features = {}
         self.parse_traffic_signal_stop_line_string_on_map()
@@ -66,6 +68,33 @@ class TrafficSignalOracle(OracleInterface):
         if topic == "/perception/traffic_light_recognition/traffic_signals":
             self.last_traffic_signal_detection = message
             self.red_signal_ids = self._extract_red_signal_ids(message)
+
+    def _is_on_route(self, signal_id: str) -> bool:
+        """Ignore signals that govern lanes the ego is not routed through.
+
+        The same guard StopSignOracle has had, and for the same reason: a stop
+        line is crossed geometrically, and geometry alone cannot say whether
+        the light was the ego's. Measured on sample-map-planning, signal 1026
+        controls lanelets 16 and 18 while the ego was routed
+        116 -> 9183 -> 9494 -> 9463 -> 9107 -- disjoint -- and its stop line is
+        0.1 m long, which StopLineCrossings' 1 m span tolerance widens to a
+        ~2 m window straddling the neighbouring approach the ego drives past.
+        The ego crossed it 11.35 s into a red that was never for it, at a
+        steady 1.47 m/s, and was reported for running a light Autoware had
+        correctly ignored.
+
+        The lane the ego occupies is NOT used for this, for the reason
+        StopSignOracle records: the lanelets a signal controls begin at its
+        stop line, so at the moment the axle crosses, the ego's pose is still
+        a wheel_base short of them.
+        """
+        route_lanelet_ids: Set[int] = set()
+        if getattr(self, "oh", None):
+            route_lanelet_ids = self.oh.get_route_lanelet_ids()
+        controlled_lane_ids = self.signal_id_to_lane_ids.get(signal_id, set())
+        if not route_lanelet_ids or not controlled_lane_ids:
+            return True
+        return not controlled_lane_ids.isdisjoint(route_lanelet_ids)
 
     def _extract_red_signal_ids(self, message: TrafficLightGroupArray) -> Set[str]:
         result: Set[str] = set()
@@ -141,6 +170,8 @@ class TrafficSignalOracle(OracleInterface):
         for signal_id in crossed_ids:
             if signal_id not in self.red_signal_ids:
                 continue
+            if not self._is_on_route(signal_id):
+                continue
             crossed_event_keys.add(
                 self.signal_id_to_event_key.get(signal_id, f"signal:{signal_id}")
             )
@@ -183,6 +214,9 @@ class TrafficSignalOracle(OracleInterface):
                     continue
                 signal_id = str(ts_id)
                 self.traffic_signal_stop_line_string_dict[signal_id] = stop_line
+                self.signal_id_to_lane_ids[signal_id] = (
+                    map_parser.get_lanelets_for_regulatory_element(signal_id)
+                )
                 event_key = self._stop_line_event_key(stop_line) or f"signal:{signal_id}"
                 self.signal_id_to_event_key[signal_id] = event_key
                 if event_key not in self.event_key_to_signal_ids:
