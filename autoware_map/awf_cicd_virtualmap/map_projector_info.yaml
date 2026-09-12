@@ -1,0 +1,6 @@
+# Corrected by scripts/fix_map_projectors.py: this map carries mgrs_code
+# tags and its local_x/local_y agree with the MGRS projection, so it is an
+# MGRS map. Declaring it Local made scenario_simulator_v2 refuse it.
+projector_type: MGRS
+vertical_datum: WGS84
+mgrs_grid: 54SUE
