@@ -163,16 +163,10 @@ class StopSignOracle(OracleInterface):
         map_parser = VectorMapParser.instance()
         if not hasattr(map_parser, "lanelet_map") or map_parser.lanelet_map is None:
             return set()
-        ids: Set[int] = set()
-        for lanelet in map_parser.lanelet_map.laneletLayer:
-            try:
-                for reg_elem in lanelet.regulatoryElements:
-                    if str(reg_elem.id) == str(reg_elem_id):
-                        ids.add(int(lanelet.id))
-                        break
-            except Exception:
-                continue
-        return ids
+        # One shared pass over laneletLayer, cached on the parser, instead of
+        # one walk of the whole layer per stop sign. See
+        # VectorMapParser.get_lanelets_for_regulatory_element.
+        return map_parser.get_lanelets_for_regulatory_element(reg_elem_id)
 
     def parse_stop_sign_stop_line_on_map(self) -> None:
         self.stop_sign_stop_line_dict = {}

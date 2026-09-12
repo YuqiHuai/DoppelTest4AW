@@ -42,6 +42,14 @@ class VectorMapParser:
     projector: MGRSProjector
     map_path: Optional[str] = None
 
+    # Derivations of the loaded map that are expensive to build and never
+    # change while it stays loaded. The singleton outlives a scenario --
+    # MapLoader re-points it at whichever map the next one drives -- so both
+    # are keyed on map_path rather than built once for the life of the process.
+    _cache_key: Optional[str] = None
+    _osm_tables: Optional[tuple] = None
+    _lanelets_by_reg_elem: Optional[Dict[str, set]] = None
+
     T = TypeVar('T')
 
     @classmethod
@@ -347,6 +355,76 @@ class VectorMapParser:
                 continue
         return None
 
+    def _invalidate_caches_if_map_changed(self) -> None:
+        if self._cache_key != self.map_path:
+            self._cache_key = self.map_path
+            self._osm_tables = None
+            self._lanelets_by_reg_elem = None
+
+    def _osm_tables_for_map(self):
+        """Node, way and relation tables of the source OSM, parsed once.
+
+        _extract_ref_line_from_osm_relation used to ET.parse() the whole file
+        and rebuild the node and way tables on every call -- once per
+        regulatory element. On awf_cicd_virtualmap that is 444 parses of a
+        7.7 MB file for the stop signs alone, which is most of the 189 s
+        StopSignOracle spent in its constructor. The relation lookup was a
+        linear scan of every relation per call on top of that.
+        """
+        self._invalidate_caches_if_map_changed()
+        if self._osm_tables is not None:
+            return self._osm_tables
+        if not self.map_path:
+            return None
+        try:
+            root = ET.parse(self.map_path).getroot()
+        except Exception:
+            return None
+
+        nodes = self._parse_local_xy_nodes(root)
+        way_by_id: Dict[str, List[tuple]] = {}
+        for way in root.findall("way"):
+            way_id = way.attrib.get("id")
+            if way_id is None:
+                continue
+            coords: List[tuple] = []
+            for nd in way.findall("nd"):
+                ref = nd.attrib.get("ref")
+                if ref in nodes:
+                    coords.append(nodes[ref])
+            if len(coords) >= 2:
+                way_by_id[way_id] = coords
+
+        relation_by_id = {
+            rel.attrib.get("id"): rel
+            for rel in root.findall("relation")
+            if rel.attrib.get("id") is not None
+        }
+
+        self._osm_tables = (nodes, way_by_id, relation_by_id)
+        return self._osm_tables
+
+    def get_lanelets_for_regulatory_element(self, reg_elem_id) -> set:
+        """Ids of the lanelets one regulatory element controls.
+
+        One pass over laneletLayer builds the mapping for every element.
+        Callers used to walk the whole layer per element, which is
+        stop_signs x lanelets -- 339,216 crossings of the lanelet2 pybind
+        boundary on awf_cicd_virtualmap against 132 on BorregasAve.
+        """
+        self._invalidate_caches_if_map_changed()
+        if self._lanelets_by_reg_elem is None:
+            index: Dict[str, set] = {}
+            for lanelet in self.lanelet_map.laneletLayer:
+                try:
+                    for reg_elem in lanelet.regulatoryElements:
+                        index.setdefault(str(reg_elem.id), set()).add(int(lanelet.id))
+                except Exception:
+                    continue
+            self._lanelets_by_reg_elem = index
+        # A copy: callers keep what they are given, and the cache outlives them.
+        return set(self._lanelets_by_reg_elem.get(str(reg_elem_id), ()))
+
     @staticmethod
     def _parse_local_xy_nodes(root) -> Dict[str, tuple]:
         nodes: Dict[str, tuple] = {}
@@ -376,35 +454,14 @@ class VectorMapParser:
         This avoids false positives caused by lane-centerline fallback when
         lanelet2 regulatory member access is unavailable in Python bindings.
         """
-        if not self.map_path:
+        tables = self._osm_tables_for_map()
+        if tables is None:
             return None
-        try:
-            root = ET.parse(self.map_path).getroot()
-        except Exception:
-            return None
-
-        nodes = self._parse_local_xy_nodes(root)
+        nodes, way_by_id, relation_by_id = tables
         if not nodes:
             return None
 
-        way_by_id: Dict[str, List[tuple]] = {}
-        for way in root.findall("way"):
-            way_id = way.attrib.get("id")
-            if way_id is None:
-                continue
-            coords: List[tuple] = []
-            for nd in way.findall("nd"):
-                ref = nd.attrib.get("ref")
-                if ref in nodes:
-                    coords.append(nodes[ref])
-            if len(coords) >= 2:
-                way_by_id[way_id] = coords
-
-        relation = None
-        for rel in root.findall("relation"):
-            if rel.attrib.get("id") == str(reg_elem_id):
-                relation = rel
-                break
+        relation = relation_by_id.get(str(reg_elem_id))
         if relation is None:
             return None
 
