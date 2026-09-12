@@ -875,6 +875,42 @@ def main() -> None:
     toolbox.register("select", tools.selNSGA2)
     toolbox.register("clone", deepcopy)
 
+    # Before generation 0 is built and driven, not after. The clock used to
+    # start below, once the initial population had already been evaluated --
+    # a full POP_SIZE of scenarios, ~45 min at population 20, that no --hours
+    # budget ever counted. Together with a deadline tested only once per
+    # generation that is what put 12-hour campaigns at 12.62 h, 13.15 h and
+    # 13.48 h (BorregasAve, 2026-09-06..08).
+    ga_start_time = time.time()
+    duration_seconds = args.duration_hours * 3600.0
+    use_time_limit = args.generations <= 0
+    ga_deadline = ga_start_time + duration_seconds if use_time_limit else None
+
+    def _evaluate_until_deadline(individuals) -> int:
+        """Evaluate individuals one at a time, stopping at the deadline.
+
+        Returns how many were evaluated. A scenario is 2-3 minutes, so the
+        budget can only be honoured between them; the alternative -- the
+        toolbox.map this replaces -- committed to the whole generation the
+        moment it started.
+
+        Individuals left unevaluated keep an invalid fitness. Callers drop
+        them: selNSGA2 reads fitness.values and cannot rank an individual that
+        was never driven.
+        """
+        done = 0
+        for ind in individuals:
+            if ga_deadline is not None and time.time() >= ga_deadline:
+                print(
+                    f"[GA] Deadline reached mid-generation; "
+                    f"{len(individuals) - done} scenario(s) not evaluated.",
+                    flush=True,
+                )
+                break
+            ind.fitness.values = toolbox.evaluate(ind)
+            done += 1
+        return done
+
     population: List[Scenario] = []
     for cid in range(POP_SIZE):
         scenario_vehicle_count = randint(min_vehicles, max_vehicles)
@@ -891,9 +927,8 @@ def main() -> None:
         ind.uid = uuid.uuid4().hex
 
     invalid_ind = [ind for ind in population if not ind.fitness.valid]
-    fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
-    for ind, fit in zip(invalid_ind, fitnesses):
-        ind.fitness.values = fit
+    _evaluate_until_deadline(invalid_ind)
+    population[:] = [ind for ind in population if ind.fitness.valid]
 
     stats = tools.Statistics(key=lambda ind: ind.fitness.values)
     stats.register("avg", np.mean, axis=0)
@@ -902,11 +937,8 @@ def main() -> None:
     logbook = tools.Logbook()
     logbook.header = "gen", "avg", "max", "min"
 
-    # Time-based or generation-based termination
-    ga_start_time = time.time()
-    duration_seconds = args.duration_hours * 3600.0
-    use_time_limit = args.generations <= 0
-
+    # Termination: the clock and ga_deadline were set above, before generation
+    # 0 was driven, so the budget covers every scenario this run evaluates.
     if use_time_limit:
         print(
             f"[GA] Running for {args.duration_hours} hours ({duration_seconds:.0f} seconds)",
@@ -937,6 +969,14 @@ def main() -> None:
                 f"[GA] Progress: {elapsed / 3600:.2f}h elapsed, {remaining / 3600:.2f}h remaining",
                 flush=True,
             )
+        if not population:
+            # Only reachable if the deadline passed before generation 0 drove a
+            # single scenario -- the check above catches that first. Belt and
+            # braces: population[0] below would be an IndexError, and finding
+            # that out at the end of a twelve-hour run is expensive.
+            print("[GA] No evaluated individuals; stopping.", flush=True)
+            break
+
         curr_gen += 1
         prev_population_uids = {ind.uid for ind in population}
         if len(population) < 2:
@@ -950,9 +990,10 @@ def main() -> None:
             ind.uid = uuid.uuid4().hex
 
         invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-        fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
-        for ind, fit in zip(invalid_ind, fitnesses):
-            ind.fitness.values = fit
+        _evaluate_until_deadline(invalid_ind)
+        # Whatever the deadline cut off was never driven and has no fitness to
+        # rank; selection sees the generation as far as it actually got.
+        offspring = [ind for ind in offspring if ind.fitness.valid]
 
         selected = toolbox.select(population + offspring, POP_SIZE)
         population[:] = selected
