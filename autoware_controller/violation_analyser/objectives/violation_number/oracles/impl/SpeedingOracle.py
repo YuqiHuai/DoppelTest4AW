@@ -71,6 +71,16 @@ class SpeedingOracle(OracleInterface):
                     features = self.get_basic_info_from_localization(message)
                     features["speed_limit"] = lane_speed_limit
                     features["lanelet_id"] = lanelet.id
+                    # The comparison above is km/h against the map's km/h
+                    # speed_limit, but get_basic_info_from_localization stores
+                    # `speed` in m/s -- so a record reads "speed 2.28,
+                    # speed_limit 8.0" and looks like a false positive when it
+                    # is a real one (8.21 km/h over an 8 km/h limit). Record the
+                    # speed that was actually compared, next to what it was
+                    # compared against. `speed` keeps its unit and value: it is
+                    # this violation's key_label, and UnsafeLaneChangeOracle
+                    # tests it too.
+                    features["speed_kmh"] = round(ego_velocity, 2)
 
                     self.trace.append((True, t, lane_speed_limit, features))
 
