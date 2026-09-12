@@ -1,5 +1,6 @@
 import os
 import pathlib
+import shlex
 import signal
 import subprocess
 from typing import List, Optional
@@ -10,6 +11,8 @@ from .config import (
     DEFAULT_MAP_PATH,
     DEFAULT_SENSOR_MODEL,
     DEFAULT_VEHICLE_MODEL,
+    EXTRA_LAUNCH_MODULES,
+    FORCED_MODULE_FLAGS,
     REPO_ROOT,
 )
 from .state import server_globals
@@ -54,10 +57,13 @@ def _resolve_map_path(map_path: Optional[str]) -> pathlib.Path:
 def _build_autoware_launch_cmd(
     map_path: pathlib.Path, vehicle_model: str, sensor_model: str
 ) -> List[str]:
-    # Extra `name:=value` launch arguments, whitespace separated. A headless
-    # host needs rviz:=false -- rviz2 is launched by default and dies without
-    # a DISPLAY.
-    extra = os.environ.get("AUTOWARE_LAUNCH_EXTRA_ARGS", "rviz:=false").split()
+    # Extra `name:=value` launch arguments. A headless host needs rviz:=false --
+    # rviz2 is launched by default and dies without a DISPLAY.
+    #
+    # shlex rather than str.split: the seeded module list below contains spaces
+    # after its commas, and splitting on whitespace would tear one argument into
+    # several that ros2 launch rejects.
+    extra = shlex.split(os.environ.get("AUTOWARE_LAUNCH_EXTRA_ARGS", "rviz:=false"))
     return [
         "ros2",
         "launch",
@@ -66,8 +72,27 @@ def _build_autoware_launch_cmd(
         f"map_path:={map_path}",
         f"vehicle_model:={vehicle_model}",
         f"sensor_model:={sensor_model}",
+        # Before the caller's extras, so AUTOWARE_LAUNCH_EXTRA_ARGS can still
+        # override any of them for a one-off launch.
+        *(f"{flag}:=true" for flag in FORCED_MODULE_FLAGS),
+        *_seeded_module_list(),
         *extra,
     ]
+
+
+def _seeded_module_list() -> List[str]:
+    """``behavior_velocity_planner_launch_modules``, pre-loaded with the classes
+    whose launch flags cannot load them.
+
+    The arg's default is the open bracket ``"["`` and the launch file appends
+    each enabled module to it, so a value ending in ``", "`` is deliberately
+    unclosed -- the chain closes it.
+    """
+
+    if not EXTRA_LAUNCH_MODULES:
+        return []
+    seeded = "[" + "".join(f"{name}, " for name in EXTRA_LAUNCH_MODULES)
+    return [f"behavior_velocity_planner_launch_modules:={seeded}"]
 
 
 def _stop_autoware_process(reason: str) -> None:
