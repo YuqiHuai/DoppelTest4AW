@@ -45,7 +45,7 @@ class ModuleOracle(OracleInterface):
     def get_interested_topics(self):
         return [
             '/planning/mission_planning/route',
-            '/planning/scenario_planning/trajectory',
+            '/planning/trajectory',
             '/perception/object_recognition/objects',
             '/localization/kinematic_state',
         ]
@@ -55,7 +55,7 @@ class ModuleOracle(OracleInterface):
             self.received_routing = True
         if topic == '/perception/object_recognition/objects':
             self.received_prediction = True
-        if topic == '/planning/scenario_planning/trajectory':
+        if topic == '/planning/trajectory':
             self.received_planning = True
             if not self.has_normal_planning_decision:
                 self.last_planning: Trajectory = message

@@ -731,8 +731,14 @@ async def start_logging(request: StartLoggingRequest):
         "/perception/object_recognition/objects",
         "/perception/object_recognition/detection/objects",
         "/perception/traffic_light_recognition/traffic_signals",
-        "/prediction/objects",
-        "/planning/scenario_planning/trajectory",
+        # The planner's final output. 0.52.0 renamed this from
+        # /planning/scenario_planning/trajectory, which is what the port
+        # recorded and what ModuleOracle listened for -- a name nothing
+        # publishes any more, so the oracle never saw a trajectory and
+        # reported PlanningFailure (type 402) for every vehicle in every
+        # scenario. A constant, not a finding: the BorregasAve runs of
+        # 2026-09-06..10 carry exactly one per vehicle throughout.
+        "/planning/trajectory",
         "/planning/mission_planning/route",
         "/planning/path_candidate/lane_change_left",
         "/planning/path_candidate/lane_change_right",

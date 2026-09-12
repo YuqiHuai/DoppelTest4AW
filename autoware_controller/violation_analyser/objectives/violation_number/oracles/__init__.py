@@ -29,7 +29,7 @@ class RecordAnalyzer:
             '/localization/acceleration',
             '/localization/kinematic_state',
             '/perception/object_recognition/objects',
-            '/planning/scenario_planning/trajectory',
+            '/planning/trajectory',
             '/planning/mission_planning/route',
             '/planning/path_candidate/lane_change_left',
             '/planning/path_candidate/lane_change_right',

@@ -42,7 +42,7 @@ class ModuleDelayOracle(OracleInterface):
         return [
             '/localization/kinematic_state',
             '/perception/object_recognition/objects',
-            '/planning/scenario_planning/trajectory'
+            '/planning/trajectory'
         ]
 
     def check_module_delay(self, module_name: str, threshold: float):
