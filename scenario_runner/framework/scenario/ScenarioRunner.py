@@ -555,6 +555,40 @@ class ScenarioRunner:
         """
         self._coverage_build_dir = build_dir or None
 
+    def _clear_coverage_counters(self, scenario_logger, reason: str) -> int:
+        """Delete every .gcda in the coverage build tree. Returns how many.
+
+        Deleting is what `lcov --zerocounters` does, without needing lcov in
+        this container.
+
+        Called at the START of a scenario as well as at the end of a harvest,
+        because only the harvest used to clear and the harvest only runs when a
+        scenario reaches the end of its driving loop. A scenario that died
+        before that -- a rejected route raises out of _configure_vehicle, which
+        is upstream of everything here -- left its counters in the shared build
+        tree, un-archived and uncleared, and the next scenario to finish
+        archived them as its own. Per-scenario coverage then means "this test
+        case, plus every failure since the last success", which is not what the
+        directory it sits in claims.
+        """
+        build = self._coverage_build_dir
+        if not build or not os.path.isdir(build):
+            return 0
+        import glob
+
+        removed = 0
+        for path in glob.glob(os.path.join(build, "**", "*.gcda"), recursive=True):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+        if removed:
+            scenario_logger.info(
+                "coverage: cleared %d counter files (%s)", removed, reason
+            )
+        return removed
+
     def _harvest_coverage(
         self, active_runs, scenario_dir: str, scenario_logger
     ) -> None:
@@ -649,13 +683,10 @@ class ScenarioRunner:
             scenario_logger.warning("coverage: archiving failed: %s", exc)
             return
 
-        # Clear, so the next scenario's counters are its own. Deleting is what
-        # `lcov --zerocounters` does, without needing lcov in this container.
-        for path in glob.glob(pattern, recursive=True):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        # Clear, so the next scenario's counters are its own. The same clear
+        # runs at the start of every scenario, which is what covers the
+        # scenarios that never reach this line.
+        self._clear_coverage_counters(scenario_logger, "harvested")
 
     def configure_recovery(
         self, restart_wait_s: float = 60.0, max_recovery_retries: int = 3
@@ -968,6 +999,12 @@ class ScenarioRunner:
         # scenario is alive during this one -- and leaves the receiver up
         # afterwards to be asked about what it recorded.
         self._restart_vehicle_containers(active_vehicles, scenario_logger)
+
+        # The containers have just restarted, so no Autoware from the previous
+        # scenario is alive to still be writing: this is the one moment the
+        # build tree can be zeroed safely. Whatever a failed scenario left
+        # behind dies here rather than in the next scenario's archive.
+        self._clear_coverage_counters(scenario_logger, "scenario start")
 
         # Mixed-size runs require per-scenario startup checks.
         scenario_logger.info("Ensuring Autoware is running for active vehicles...")
